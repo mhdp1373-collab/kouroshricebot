@@ -34,7 +34,7 @@ from telegram import (
 )
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ConversationHandler, filters, ContextTypes
+    ConversationHandler, filters, ContextTypes, TypeHandler, ApplicationHandlerStop
 )
 from dotenv import load_dotenv
 
@@ -49,6 +49,24 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# ─── محافظ ضد ارسال تکراری ───
+# اگر پلتفرم بله (یا مکانیزم polling) یک آپدیت را بیش از یک‌بار تحویل بدهد،
+# این محافظ با شناسه‌ی یکتای هر آپدیت (update_id) جلوی پردازش دوباره‌اش را می‌گیرد.
+_seen_update_ids: set = set()
+_seen_update_ids_order: list = []
+_MAX_SEEN_UPDATE_IDS = 5000
+
+async def dedupe_update_guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.update_id
+    if uid in _seen_update_ids:
+        logger.warning(f"⚠️ آپدیت تکراری نادیده گرفته شد — update_id={uid} (این آپدیت قبلاً پردازش شده بود)")
+        raise ApplicationHandlerStop
+    _seen_update_ids.add(uid)
+    _seen_update_ids_order.append(uid)
+    if len(_seen_update_ids_order) > _MAX_SEEN_UPDATE_IDS:
+        oldest = _seen_update_ids_order.pop(0)
+        _seen_update_ids.discard(oldest)
 
 # ─── تنظیمات ───
 # توکن را از @Bot_Father داخل پیام‌رسان بله بگیرید
@@ -1828,6 +1846,9 @@ def main():
         ],
         allow_reentry=True,
     )
+
+    # محافظ ضد آپدیت تکراری — باید زودتر از همه‌ی هندلرهای دیگر اجرا شود (group=-1)
+    app.add_handler(TypeHandler(Update, dedupe_update_guard), group=-1)
 
     app.add_handler(conv_handler)
 
