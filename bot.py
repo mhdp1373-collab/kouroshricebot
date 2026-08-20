@@ -1768,6 +1768,19 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 # ─────────── راه‌اندازی ───────────
 
+async def _on_startup(application):
+    """قبل از شروع polling، هر webhook فعال روی این ربات را حذف می‌کند تا هرگز polling و webhook هم‌زمان فعال نباشند
+    (فعال بودن هم‌زمان هر دو، دلیل رایج ارسال دوبار هر پیام است)."""
+    try:
+        info = await application.bot.get_webhook_info()
+        if info and info.url:
+            logger.warning(f"⚠️ یک webhook فعال روی این ربات پیدا شد ({info.url}) — در حال حذف آن تا فقط polling فعال باشد...")
+        deleted = await application.bot.delete_webhook(drop_pending_updates=True)
+        logger.info(f"✅ بررسی/حذف webhook انجام شد (نتیجه: {deleted}).")
+    except Exception as e:
+        logger.error(f"⚠️ خطا در بررسی/حذف webhook: {e}")
+
+
 def main():
     # شناسه‌ی یکتای این نمونه از پروسه — اگر در لاگ‌ها دو INSTANCE_ID متفاوت هم‌زمان دیدید،
     # یعنی دو نسخه از ربات هم‌زمان در حال اجرا هستند و همین باعث ارسال دوبار هر پیام می‌شود.
@@ -1799,6 +1812,7 @@ def main():
         .token(BOT_TOKEN)
         .base_url(BALE_API_BASE_URL)
         .base_file_url(BALE_API_FILE_URL)
+        .post_init(_on_startup)
         .build()
     )
 
