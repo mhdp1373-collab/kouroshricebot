@@ -46,15 +46,36 @@ import uvicorn
 
 load_dotenv()
 
+# ─── مسیر ذخیره‌سازی دائمی ───
+# روی Railway (و بیشتر PaaSها)، فضای پیش‌فرض کانتینر ephemeral است: با هر دیپلوی/ری‌استارت
+# پاک می‌شود. برای جلوگیری از پاک شدن database.json و bot.log، یک Volume دائمی بساز و
+# مسیر Mount آن را در متغیر محیطی DATA_DIR بگذار (مثلاً DATA_DIR=/data).
+# اگر DATA_DIR تنظیم نشده باشد (مثلاً حین تست روی سیستم خودت)، فایل‌ها کنار خود کد
+# ذخیره می‌شوند — دقیقاً مثل رفتار قبلی.
+DATA_DIR = os.getenv("DATA_DIR", "").strip()
+if DATA_DIR:
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+def _data_path(filename: str) -> str:
+    return os.path.join(DATA_DIR, filename) if DATA_DIR else filename
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
     handlers=[
-        logging.FileHandler("bot.log", encoding="utf-8"),
+        logging.FileHandler(_data_path("bot.log"), encoding="utf-8"),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
+
+if DATA_DIR:
+    logger.info(f"💾 مسیر ذخیره‌سازی دائمی (DATA_DIR) فعال است: {DATA_DIR}")
+else:
+    logger.warning(
+        "⚠️ متغیر DATA_DIR تنظیم نشده — دیتابیس کنار خود کد ذخیره می‌شود و با هر دیپلوی "
+        "روی Railway پاک خواهد شد. یک Volume دائمی بساز و DATA_DIR را به مسیر Mount آن تنظیم کن."
+    )
 
 # ─── محافظ ضد ارسال تکراری ───
 # اگر پلتفرم بله (یا مکانیزم polling) یک آپدیت را بیش از یک‌بار تحویل بدهد،
@@ -80,7 +101,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BALE_BOT_TOKEN_HERE")
 ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(","))) if os.getenv("ADMIN_IDS") else []
 STORAGE_CHANNEL_ID = os.getenv("STORAGE_CHANNEL_ID", "")
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@koroshrice")
-DB_FILE = "database.json"
+DB_FILE = _data_path("database.json")
 
 # ─── تنظیمات داشبورد وب ادمین ───
 DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN", "")
@@ -2128,15 +2149,15 @@ async def run_app():
     if os.path.exists(DB_FILE):
         try:
             existing = load_db()
-            logger.info(f"📦 دیتابیس موجود بارگذاری شد — {len(existing)} بارنامه ثبت‌شده.")
+            logger.info(f"📦 دیتابیس موجود بارگذاری شد از «{DB_FILE}» — {len(existing)} بارنامه ثبت‌شده.")
         except Exception as e:
             logger.error(f"⚠️ خطا در خواندن دیتابیس موجود: {e}")
     else:
         logger.warning(
-            "⚠️ فایل دیتابیس (database.json) پیدا نشد — یک دیتابیس خالی جدید ساخته می‌شود. "
+            f"⚠️ فایل دیتابیس («{DB_FILE}») پیدا نشد — یک دیتابیس خالی جدید ساخته می‌شود. "
             "اگر این پیام را بعد از هر ری‌استارت می‌بینید، یعنی فضای ذخیره‌سازی سرور شما پایدار (persistent) نیست "
             "و تمام بارنامه‌ها/تاریخچه‌ها با هر دیپلوی یا ری‌استارت پاک می‌شوند — "
-            "برای رفع این مشکل باید یک Volume دائمی در Railway به مسیر پروژه متصل کنید."
+            "برای رفع این مشکل باید یک Volume دائمی در Railway بسازی و متغیر DATA_DIR را به مسیر Mount آن تنظیم کنی."
         )
 
     app = (
