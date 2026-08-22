@@ -3,590 +3,471 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>پی‌بار — دفتر بارنامه‌ها</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+<title>داشبورد پی‌بار</title>
 <style>
-  :root{
-    --ink:#16213a;
-    --ink-2:#223059;
-    --paper:#f6f3ec;
-    --paper-2:#efe9dc;
-    --card:#ffffff;
-    --line:#e4ddcc;
-    --amber:#c07a2c;
-    --amber-dark:#9c5f1f;
-    --green:#2e7d4f;
-    --green-bg:#e5f3ea;
-    --red:#b23a2e;
-    --red-bg:#fbe9e6;
-    --blue:#2f5f9e;
-    --blue-bg:#e8eef8;
-    --gray:#6b6656;
-    --gray-bg:#eeeae0;
-    --shadow: 0 8px 24px rgba(22,33,58,.08), 0 1px 3px rgba(22,33,58,.06);
-    --mono: 'JetBrains Mono', ui-monospace, monospace;
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1f232c; --border: #2a2f3a;
+    --text: #e8eaed; --muted: #9aa0ab; --primary: #4f8cff; --green: #34c76f;
+    --red: #ff5c5c; --orange: #ffb020; --radius: 10px;
   }
-  *{box-sizing:border-box}
-  html,body{margin:0;padding:0}
-  body{
-    background:var(--paper);
-    color:var(--ink);
-    font-family:'Vazirmatn', Tahoma, sans-serif;
-    min-height:100vh;
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text); font-family: Tahoma, "Segoe UI", sans-serif;
+    margin: 0; padding: 0; min-height: 100vh;
   }
-  ::selection{background:#f0d9b5}
+  header {
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 14px 20px; display: flex; align-items: center; justify-content: space-between;
+    position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { font-size: 18px; margin: 0; }
+  #loginBox, #app { padding: 20px; max-width: 1100px; margin: 0 auto; }
+  #loginBox { max-width: 380px; margin-top: 80px; text-align: center; }
+  input, textarea, select, button {
+    font-family: inherit; font-size: 14px; border-radius: var(--radius);
+    border: 1px solid var(--border); background: var(--panel2); color: var(--text);
+    padding: 10px 12px; outline: none;
+  }
+  input:focus, textarea:focus { border-color: var(--primary); }
+  button { cursor: pointer; border: none; font-weight: 600; transition: opacity .15s; }
+  button:hover { opacity: .85; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-primary { background: var(--primary); color: #fff; }
+  .btn-green { background: var(--green); color: #06210f; }
+  .btn-red { background: var(--red); color: #2b0505; }
+  .btn-orange { background: var(--orange); color: #2b1c00; }
+  .btn-ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  .stats { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+  .stat-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px 18px; flex: 1; min-width: 120px; text-align: center;
+  }
+  .stat-card .num { font-size: 22px; font-weight: 700; }
+  .stat-card .label { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .toolbar { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
+  .toolbar input[type=text] { flex: 1; min-width: 180px; }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+  .tab {
+    padding: 8px 14px; border-radius: 999px; border: 1px solid var(--border);
+    background: var(--panel2); color: var(--muted); cursor: pointer; font-size: 13px;
+  }
+  .tab.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: var(--radius); overflow: hidden; }
+  th, td { padding: 12px 14px; text-align: right; border-bottom: 1px solid var(--border); font-size: 13px; }
+  th { color: var(--muted); font-weight: 600; background: var(--panel2); }
+  tr.row { cursor: pointer; }
+  tr.row:hover { background: var(--panel2); }
+  .badge { padding: 3px 10px; border-radius: 999px; font-size: 12px; white-space: nowrap; }
+  .badge-pending { background: #3a3210; color: var(--orange); }
+  .badge-approved { background: #0f3a22; color: var(--green); }
+  .badge-rejected { background: #3a1212; color: var(--red); }
+  .badge-partial { background: #3a2a10; color: var(--orange); }
+  .badge-none { background: #262b34; color: var(--muted); }
+  #empty { text-align: center; color: var(--muted); padding: 40px 0; }
 
-  /* ── هدر ── */
-  header{
-    background:linear-gradient(180deg,var(--ink),var(--ink-2));
-    color:#f2ede0;
-    padding:22px 28px 26px;
-    position:relative;
-    overflow:hidden;
+  .overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none;
+    align-items: flex-start; justify-content: center; z-index: 50; overflow-y: auto; padding: 30px 14px;
   }
-  header::after{
-    content:"";
-    position:absolute; inset:0;
-    background-image:repeating-linear-gradient(135deg, rgba(255,255,255,.035) 0 2px, transparent 2px 26px);
-    pointer-events:none;
+  .overlay.open { display: flex; }
+  .modal {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    max-width: 640px; width: 100%; padding: 20px;
   }
-  .header-row{display:flex; align-items:center; justify-content:space-between; gap:18px; flex-wrap:wrap; position:relative; z-index:1}
-  .brand{display:flex; align-items:baseline; gap:12px}
-  .brand h1{font-size:22px; font-weight:800; margin:0; letter-spacing:.2px}
-  .brand span{font-family:var(--mono); font-size:12px; color:#c9bfa0; letter-spacing:1px}
-  .token-box{display:flex; align-items:center; gap:8px}
-  .token-box input{
-    background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.18);
-    color:#f2ede0; border-radius:9px; padding:9px 12px; font-family:var(--mono);
-    font-size:13px; width:220px; outline:none;
+  .modal h2 { margin-top: 0; font-size: 17px; }
+  .modal .close { float: left; cursor: pointer; color: var(--muted); font-size: 20px; }
+  .doc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin: 14px 0; }
+  .doc-card { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--panel2); }
+  .doc-card img { width: 100%; height: 130px; object-fit: cover; display: block; }
+  .doc-card .doc-text { padding: 12px; font-size: 13px; min-height: 60px; display: flex; align-items: center; justify-content: center; text-align: center; }
+  .doc-card .doc-label { font-size: 12px; color: var(--muted); padding: 6px 8px; border-top: 1px solid var(--border); }
+  .info-line { font-size: 13px; color: var(--muted); margin: 4px 0; }
+  .info-line b { color: var(--text); }
+  .action-row { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+  .action-row > button { flex: 1; min-width: 110px; }
+  .subform { margin-top: 12px; display: none; }
+  .subform.open { display: block; }
+  .subform textarea { width: 100%; min-height: 70px; margin-bottom: 8px; resize: vertical; }
+  .msgbox { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 14px; }
+  .msgbox textarea { width: 100%; min-height: 60px; margin-bottom: 8px; resize: vertical; }
+  .section-title {
+    font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px;
+    margin: 22px 0 10px; display: flex; align-items: center; gap: 8px;
   }
-  .token-box input::placeholder{color:#a79f88}
-  .token-box input:focus{border-color:var(--amber)}
-  .btn{
-    border:none; border-radius:9px; padding:9px 16px; font-family:inherit;
-    font-size:13.5px; font-weight:600; cursor:pointer; transition:.15s transform, .15s filter;
+  .section-title::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+  .timeline { position: relative; padding-right: 20px; }
+  .timeline::before {
+    content: ""; position: absolute; right: 5px; top: 4px; bottom: 4px; width: 2px; background: var(--border);
   }
-  .btn:active{transform:translateY(1px)}
-  .btn-amber{background:var(--amber); color:#fff}
-  .btn-amber:hover{filter:brightness(1.08)}
-  .btn-ghost{background:rgba(255,255,255,.1); color:#f2ede0; border:1px solid rgba(255,255,255,.2)}
-  .btn-ghost:hover{background:rgba(255,255,255,.16)}
-  #tokenStatus{font-family:var(--mono); font-size:11.5px; color:#c9bfa0}
-  #tokenStatus.ok{color:#8fd6a8}
-  #tokenStatus.bad{color:#e79b8f}
+  .tl-item { position: relative; padding-bottom: 14px; }
+  .tl-item:last-child { padding-bottom: 0; }
+  .tl-dot {
+    position: absolute; right: -20px; top: 3px; width: 12px; height: 12px; border-radius: 50%;
+    background: var(--panel); border: 3px solid var(--muted);
+  }
+  .tl-item.ev-approved .tl-dot { border-color: var(--green); }
+  .tl-item.ev-rejected .tl-dot { border-color: var(--red); }
+  .tl-item.ev-partial .tl-dot { border-color: var(--orange); }
+  .tl-item.ev-driver .tl-dot { border-color: var(--primary); }
+  .tl-card { background: var(--panel2); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; }
+  .tl-time { font-size: 11px; color: var(--muted); direction: ltr; text-align: right; }
+  .tl-event { font-size: 13.5px; font-weight: 700; margin: 2px 0 3px; }
+  .tl-actor { font-size: 12px; color: var(--muted); }
+  .tl-detail { font-size: 12.5px; color: var(--text); margin-top: 5px; line-height: 1.7; white-space: pre-wrap; }
+  .no-log { color: var(--muted); font-size: 13px; }
 
-  /* ── نوار آمار ── */
-  .stats{
-    display:grid; grid-template-columns:repeat(5,1fr); gap:1px;
-    background:var(--line); border:1px solid var(--line); border-radius:12px;
-    overflow:hidden; margin:20px 28px 0; box-shadow:var(--shadow);
+  .toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: var(--panel2); border: 1px solid var(--border); padding: 10px 20px;
+    border-radius: var(--radius); font-size: 13px; z-index: 100; display: none;
   }
-  .stat{background:var(--card); padding:14px 16px; cursor:pointer; transition:.15s background}
-  .stat:hover{background:var(--paper-2)}
-  .stat.active{background:var(--ink); }
-  .stat.active .stat-num, .stat.active .stat-label{color:#f2ede0}
-  .stat-num{font-family:var(--mono); font-size:22px; font-weight:700; display:block}
-  .stat-label{font-size:12px; color:var(--gray); margin-top:2px; display:block}
-
-  /* ── نوار ابزار ── */
-  .toolbar{
-    display:flex; gap:10px; align-items:center; margin:16px 28px 8px; flex-wrap:wrap;
-  }
-  .toolbar input[type=search]{
-    flex:1; min-width:220px; padding:10px 14px; border-radius:9px; border:1px solid var(--line);
-    background:var(--card); font-family:inherit; font-size:13.5px; outline:none;
-  }
-  .toolbar input[type=search]:focus{border-color:var(--amber)}
-
-  main{padding:6px 28px 60px}
-
-  /* ── جدول بارنامه‌ها ── */
-  .list{background:var(--card); border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow); overflow:hidden}
-  .row{
-    display:grid; grid-template-columns:150px 1fr 150px 90px 130px 26px;
-    gap:10px; align-items:center; padding:13px 18px; border-bottom:1px solid var(--line);
-    cursor:pointer; transition:.12s background;
-  }
-  .row:last-child{border-bottom:none}
-  .row:hover{background:var(--paper-2)}
-  .row .bn{font-family:var(--mono); font-weight:600; font-size:14px}
-  .row .driver{font-size:13.5px; color:#3a3624}
-  .row .driver small{display:block; color:var(--gray); font-family:var(--mono); font-size:11px}
-  .row .date{font-family:var(--mono); font-size:12px; color:var(--gray)}
-  .row .docs{font-family:var(--mono); font-size:12px; color:var(--gray); text-align:center}
-  .row .chev{color:var(--gray); font-size:13px}
-  .head-row{
-    display:grid; grid-template-columns:150px 1fr 150px 90px 130px 26px; gap:10px;
-    padding:10px 18px; font-size:11.5px; color:var(--gray); border-bottom:1px solid var(--line);
-    background:var(--paper-2);
-  }
-  .empty{padding:50px 20px; text-align:center; color:var(--gray)}
-  .empty b{display:block; color:var(--ink); font-size:15px; margin-bottom:6px}
-
-  .badge{
-    display:inline-flex; align-items:center; gap:5px; padding:4px 10px; border-radius:99px;
-    font-size:11.5px; font-weight:600; white-space:nowrap;
-  }
-  .badge.approved{background:var(--green-bg); color:var(--green)}
-  .badge.rejected{background:var(--red-bg); color:var(--red)}
-  .badge.partial{background:#fbf0dd; color:var(--amber-dark)}
-  .badge.pending{background:var(--blue-bg); color:var(--blue)}
-  .badge.none{background:var(--gray-bg); color:var(--gray)}
-
-  /* ── پنل جزئیات (کشویی از راست) ── */
-  .overlay{
-    position:fixed; inset:0; background:rgba(22,25,35,.42); backdrop-filter:blur(1px);
-    opacity:0; pointer-events:none; transition:.2s opacity; z-index:40;
-  }
-  .overlay.show{opacity:1; pointer-events:auto}
-  .panel{
-    position:fixed; top:0; bottom:0; right:0; width:min(560px,100%);
-    background:var(--paper); box-shadow:-16px 0 40px rgba(0,0,0,.18);
-    transform:translateX(100%); transition:.25s transform cubic-bezier(.2,.8,.3,1);
-    z-index:41; display:flex; flex-direction:column;
-  }
-  .panel.show{transform:translateX(0)}
-  .panel-head{
-    background:linear-gradient(180deg,var(--ink),var(--ink-2)); color:#f2ede0;
-    padding:20px 24px; flex:0 0 auto;
-  }
-  .panel-head .top{display:flex; justify-content:space-between; align-items:flex-start; gap:10px}
-  .panel-head .bn{font-family:var(--mono); font-size:19px; font-weight:700}
-  .panel-head .close{background:none; border:none; color:#cfc7ac; font-size:20px; cursor:pointer; line-height:1; padding:4px}
-  .panel-head .close:hover{color:#fff}
-  .panel-meta{display:flex; gap:16px; margin-top:10px; flex-wrap:wrap; font-size:12.5px; color:#cfc7ac}
-  .panel-meta b{color:#f2ede0; font-weight:600}
-  .panel-body{overflow-y:auto; flex:1 1 auto; padding:20px 24px 40px}
-  .section-title{
-    font-size:12.5px; font-weight:700; color:var(--gray); text-transform:uppercase;
-    letter-spacing:.5px; margin:26px 0 12px; display:flex; align-items:center; gap:8px;
-  }
-  .section-title:first-child{margin-top:0}
-  .section-title::after{content:""; flex:1; height:1px; background:var(--line)}
-
-  /* اسناد */
-  .docs-grid{display:grid; grid-template-columns:1fr 1fr; gap:10px}
-  .doc-card{background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden}
-  .doc-card img{width:100%; height:120px; object-fit:cover; display:block; background:var(--paper-2)}
-  .doc-card .doc-label{padding:8px 10px; font-size:12px; font-weight:600}
-  .doc-card .doc-text{padding:8px 10px 12px; font-family:var(--mono); font-size:12.5px; color:var(--ink-2); word-break:break-all}
-  .doc-card a.doc-link{display:block; padding:8px 10px 12px; font-size:12px; color:var(--blue); text-decoration:none}
-  .doc-card a.doc-link:hover{text-decoration:underline}
-
-  /* اقدامات */
-  .actions-grid{display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px}
-  .act-btn{
-    padding:10px 8px; border-radius:9px; border:1px solid var(--line); background:var(--card);
-    font-family:inherit; font-size:12.5px; font-weight:600; cursor:pointer; transition:.15s;
-  }
-  .act-btn:hover{filter:brightness(.97)}
-  .act-btn.approve{color:var(--green); border-color:#bfe0cc}
-  .act-btn.reject{color:var(--red); border-color:#eec4bd}
-  .act-btn.partial{color:var(--amber-dark); border-color:#e9cfa0}
-  .act-form{display:none; margin-top:10px; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px}
-  .act-form.show{display:block}
-  .act-form textarea{
-    width:100%; min-height:64px; border:1px solid var(--line); border-radius:8px; padding:8px 10px;
-    font-family:inherit; font-size:13px; resize:vertical; outline:none;
-  }
-  .act-form textarea:focus{border-color:var(--amber)}
-  .act-form .row-btns{display:flex; gap:8px; margin-top:8px}
-  .act-form .row-btns .btn{flex:1; padding:8px}
-  .msg-box{margin-top:14px}
-  .msg-box textarea{width:100%; min-height:56px; border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-family:inherit; font-size:13px; outline:none}
-  .msg-box textarea:focus{border-color:var(--amber)}
-  .msg-box button{margin-top:8px}
-
-  .review-note{
-    background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 14px;
-    font-size:13px; line-height:1.9;
-  }
-  .review-note b{color:var(--ink)}
-
-  /* تاریخچه / لاگ */
-  .timeline{position:relative; padding-right:22px}
-  .timeline::before{
-    content:""; position:absolute; right:6px; top:4px; bottom:4px; width:2px; background:var(--line);
-  }
-  .tl-item{position:relative; padding-bottom:18px}
-  .tl-item:last-child{padding-bottom:0}
-  .tl-dot{
-    position:absolute; right:-22px; top:2px; width:13px; height:13px; border-radius:50%;
-    background:var(--card); border:3px solid var(--gray);
-  }
-  .tl-item.ev-approved .tl-dot{border-color:var(--green)}
-  .tl-item.ev-rejected .tl-dot{border-color:var(--red)}
-  .tl-item.ev-partial .tl-dot{border-color:var(--amber)}
-  .tl-item.ev-driver .tl-dot{border-color:var(--blue)}
-  .tl-card{background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 14px}
-  .tl-time{font-family:var(--mono); font-size:11px; color:var(--gray)}
-  .tl-event{font-size:13.5px; font-weight:700; margin:2px 0 3px}
-  .tl-actor{font-size:12px; color:var(--gray)}
-  .tl-detail{font-size:12.5px; color:#3a3624; margin-top:5px; line-height:1.7; white-space:pre-wrap}
-  .no-log{color:var(--gray); font-size:13px; padding:6px 2px}
-
-  .toast{
-    position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(12px);
-    background:var(--ink); color:#f2ede0; padding:11px 22px; border-radius:10px; font-size:13px;
-    opacity:0; pointer-events:none; transition:.2s; z-index:60; box-shadow:var(--shadow);
-  }
-  .toast.show{opacity:1; transform:translateX(-50%) translateY(0)}
-  .toast.err{background:var(--red)}
-
-  @media (max-width:760px){
-    .stats{grid-template-columns:repeat(3,1fr)}
-    .row, .head-row{grid-template-columns:1fr 1fr}
-    .row .docs, .row .chev, .head-row > span:nth-child(4), .head-row > span:nth-child(6){display:none}
-    .docs-grid{grid-template-columns:1fr}
-    .actions-grid{grid-template-columns:1fr}
+  .toast.show { display: block; }
+  .toast.err { border-color: var(--red); color: var(--red); }
+  .toast.ok { border-color: var(--green); color: var(--green); }
+  @media (max-width: 640px) {
+    table, thead, tbody, th, td, tr { display: block; }
+    thead { display: none; }
+    tr.row { border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 10px; padding: 8px; }
+    td { border: none; padding: 4px 6px; }
+    td::before { content: attr(data-label); color: var(--muted); display: inline-block; min-width: 90px; font-size: 11px; }
   }
 </style>
 </head>
 <body>
 
-<header>
-  <div class="header-row">
-    <div class="brand">
-      <h1>📦 دفتر بارنامه‌های پی‌بار</h1>
-      <span>PIBAR ADMIN LOG</span>
-    </div>
-    <div class="token-box">
-      <span id="tokenStatus">توکن وارد نشده</span>
-      <input id="tokenInput" type="password" placeholder="DASHBOARD_TOKEN" autocomplete="off">
-      <button class="btn btn-amber" onclick="saveToken()">ورود</button>
-      <button class="btn btn-ghost" onclick="loadAll()">🔄 به‌روزرسانی</button>
-    </div>
-  </div>
-</header>
-
-<div class="stats" id="statsRow"></div>
-
-<div class="toolbar">
-  <input type="search" id="searchInput" placeholder="جست‌وجوی شماره بارنامه یا نام راننده…" oninput="renderList()">
+<div id="loginBox">
+  <h1>🔐 داشبورد پی‌بار</h1>
+  <p style="color:var(--muted); font-size:13px;">توکن دسترسی ادمین را وارد کنید</p>
+  <input type="password" id="tokenInput" placeholder="توکن" style="width:100%; margin-bottom:10px;">
+  <button class="btn-primary" style="width:100%;" onclick="doLogin()">ورود</button>
+  <div id="loginError" style="color:var(--red); font-size:12px; margin-top:8px;"></div>
 </div>
 
-<main>
-  <div class="list" id="listBox">
-    <div class="empty"><b>در حال بارگذاری…</b>توکن داشبورد را وارد کن تا لیست بارنامه‌ها نمایش داده شود.</div>
-  </div>
-</main>
+<div id="app" style="display:none;">
+  <header>
+    <h1>📦 داشبورد بارنامه‌ها</h1>
+    <button class="btn-ghost" onclick="logout()">خروج</button>
+  </header>
 
-<div class="overlay" id="overlay" onclick="closePanel()"></div>
-<div class="panel" id="panel">
-  <div class="panel-head">
-    <div class="top">
-      <div>
-        <div class="bn" id="pBarname">—</div>
-        <div id="pBadgeWrap" style="margin-top:6px"></div>
-      </div>
-      <button class="close" onclick="closePanel()">✕</button>
+  <div style="padding:20px; max-width:1100px; margin:0 auto;">
+    <div class="stats" id="statsRow"></div>
+
+    <div class="toolbar">
+      <input type="text" id="searchInput" placeholder="جستجوی شماره بارنامه..." oninput="debouncedLoad()">
+      <button class="btn-ghost" onclick="loadList()">🔄 بروزرسانی</button>
     </div>
-    <div class="panel-meta">
-      <span>👤 <b id="pDriver">—</b></span>
-      <span>🕐 ثبت: <b id="pCreated">—</b></span>
-      <span>✅ ثبت نهایی: <b id="pCompleted">—</b></span>
+
+    <div class="tabs" id="tabsRow" style="margin-bottom:16px;"></div>
+
+    <div id="listWrap">
+      <table>
+        <thead>
+          <tr>
+            <th>وضعیت</th><th>شماره بارنامه</th><th>راننده</th><th>مستندات</th><th>تاریخ ثبت</th>
+          </tr>
+        </thead>
+        <tbody id="listBody"></tbody>
+      </table>
+      <div id="empty" style="display:none;">چیزی برای نمایش نیست</div>
     </div>
   </div>
-  <div class="panel-body" id="pBody">
-    <!-- با جاوااسکریپت پر می‌شود -->
+</div>
+
+<div class="overlay" id="detailOverlay">
+  <div class="modal">
+    <span class="close" onclick="closeDetail()">✕</span>
+    <div id="detailContent">در حال بارگذاری...</div>
   </div>
 </div>
 
 <div class="toast" id="toast"></div>
 
 <script>
+let TOKEN = localStorage.getItem('pibar_token') || '';
+let currentStatus = 'all';
+let currentBarname = null;
+let debounceTimer = null;
+
 const STATUS_LABELS = {
-  approved: {text:'✅ تایید شده', cls:'approved'},
-  rejected: {text:'❌ عدم تایید', cls:'rejected'},
-  partial:  {text:'⚠️ کسری بار', cls:'partial'},
-  pending:  {text:'🕐 در انتظار بررسی', cls:'pending'},
-  none:     {text:'⏳ ثبت نشده', cls:'none'},
+  all: 'همه', pending: '🕐 در انتظار', approved: '✅ تایید شده',
+  rejected: '❌ رد شده', partial: '⚠️ کسری بار', none: 'ثبت‌نشده'
 };
-const STAT_ORDER = ['all','pending','partial','approved','rejected'];
-const STAT_TITLES = {all:'همه', pending:'در انتظار', partial:'کسری بار', approved:'تایید شده', rejected:'عدم تایید'};
+const BADGE_CLASS = {
+  pending: 'badge-pending', approved: 'badge-approved',
+  rejected: 'badge-rejected', partial: 'badge-partial', none: 'badge-none'
+};
 
-let TOKEN = localStorage.getItem('pibar_dashboard_token') || '';
-let ALL_ROWS = [];
-let ACTIVE_STATUS = 'all';
-let CURRENT_BARNAME = null;
-
-function $(id){ return document.getElementById(id); }
-
-function toast(msg, isErr){
-  const t = $('toast');
+function toast(msg, ok) {
+  const t = document.getElementById('toast');
   t.textContent = msg;
-  t.className = 'toast show' + (isErr ? ' err' : '');
-  clearTimeout(t._h);
-  t._h = setTimeout(()=> t.className='toast', 2600);
+  t.className = 'toast show ' + (ok ? 'ok' : 'err');
+  setTimeout(() => t.className = 'toast', 2500);
 }
 
-async function api(path, opts={}){
-  const headers = Object.assign({'X-Dashboard-Token': TOKEN}, opts.headers || {});
-  const res = await fetch(path, Object.assign({}, opts, {headers}));
-  if(!res.ok){
-    let detail = res.statusText;
-    try{ const j = await res.json(); detail = j.detail || detail; }catch(e){}
-    throw new Error(detail || ('خطای ' + res.status));
-  }
-  return res.status === 204 ? null : res.json();
+function debouncedLoad() {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(loadList, 350);
 }
 
-function saveToken(){
-  TOKEN = $('tokenInput').value.trim();
-  localStorage.setItem('pibar_dashboard_token', TOKEN);
-  $('tokenInput').value = '';
-  loadAll();
+async function apiFetch(path, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({'X-Dashboard-Token': TOKEN, 'Content-Type': 'application/json'}, opts.headers || {});
+  const res = await fetch(path, opts);
+  if (res.status === 401) { logout(); throw new Error('توکن نامعتبر'); }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || 'خطا در ارتباط با سرور');
+  return data;
 }
 
-async function loadAll(){
-  if(!TOKEN){
-    $('tokenStatus').textContent = 'توکن وارد نشده';
-    $('tokenStatus').className = 'bad';
-    return;
-  }
-  try{
-    ALL_ROWS = await api('/api/barnames?status=all&search=');
-    $('tokenStatus').textContent = 'متصل ✓';
-    $('tokenStatus').className = 'ok';
-    renderStats();
-    renderList();
-  }catch(e){
-    $('tokenStatus').textContent = 'توکن نامعتبر';
-    $('tokenStatus').className = 'bad';
-    $('listBox').innerHTML = `<div class="empty"><b>ورود ناموفق</b>${e.message}</div>`;
-  }
+function doLogin() {
+  const val = document.getElementById('tokenInput').value.trim();
+  if (!val) return;
+  TOKEN = val;
+  localStorage.setItem('pibar_token', TOKEN);
+  checkAndEnter();
 }
 
-function renderStats(){
-  const counts = {all: ALL_ROWS.length, pending:0, partial:0, approved:0, rejected:0};
-  ALL_ROWS.forEach(r=>{ if(counts[r.status] !== undefined) counts[r.status]++; });
-  $('statsRow').innerHTML = STAT_ORDER.map(k => `
-    <div class="stat ${ACTIVE_STATUS===k?'active':''}" onclick="setStatusFilter('${k}')">
-      <span class="stat-num">${counts[k]}</span>
-      <span class="stat-label">${STAT_TITLES[k]}</span>
-    </div>
-  `).join('');
+function logout() {
+  localStorage.removeItem('pibar_token');
+  TOKEN = '';
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('loginBox').style.display = 'block';
 }
 
-function setStatusFilter(k){
-  ACTIVE_STATUS = k;
-  renderStats();
-  renderList();
-}
-
-function renderList(){
-  const q = $('searchInput').value.trim();
-  let rows = ALL_ROWS.filter(r => ACTIVE_STATUS==='all' || r.status===ACTIVE_STATUS);
-  if(q){
-    rows = rows.filter(r =>
-      r.barname.includes(q) || (r.driver_name||'').includes(q)
-    );
-  }
-  if(rows.length===0){
-    $('listBox').innerHTML = `<div class="empty"><b>چیزی پیدا نشد</b>فیلتر یا عبارت جست‌وجو را تغییر بده.</div>`;
-    return;
-  }
-  const head = `<div class="head-row"><span>شماره بارنامه</span><span>راننده</span><span>تاریخ ثبت</span><span>مستندات</span><span>وضعیت</span><span></span></div>`;
-  const body = rows.map(r => {
-    const st = STATUS_LABELS[r.status] || STATUS_LABELS.none;
-    return `
-      <div class="row" onclick="openPanel('${escAttr(r.barname)}')">
-        <span class="bn">${esc(r.barname)}</span>
-        <span class="driver">${esc(r.driver_name||'-')}<small>${r.driver_id||''}</small></span>
-        <span class="date">${esc(r.created_at||'-')}</span>
-        <span class="docs">${r.doc_count} سند</span>
-        <span><span class="badge ${st.cls}">${st.text}</span></span>
-        <span class="chev">◂</span>
-      </div>`;
-  }).join('');
-  $('listBox').innerHTML = head + body;
-}
-
-function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function escAttr(s){ return esc(s).replace(/'/g,'&#39;'); }
-
-/* ── پنل جزئیات ── */
-async function openPanel(barname){
-  CURRENT_BARNAME = barname;
-  $('overlay').classList.add('show');
-  $('panel').classList.add('show');
-  $('pBarname').textContent = barname;
-  $('pBody').innerHTML = `<div class="empty"><b>در حال بارگذاری…</b></div>`;
-  try{
-    const d = await api('/api/barnames/' + encodeURIComponent(barname));
-    renderPanel(d);
-  }catch(e){
-    $('pBody').innerHTML = `<div class="empty"><b>خطا</b>${esc(e.message)}</div>`;
+async function checkAndEnter() {
+  try {
+    await apiFetch('/api/barnames?status=all');
+    document.getElementById('loginBox').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    renderTabs();
+    loadList();
+  } catch (e) {
+    document.getElementById('loginError').textContent = 'توکن اشتباه است یا سرور در دسترس نیست';
   }
 }
 
-function closePanel(){
-  $('overlay').classList.remove('show');
-  $('panel').classList.remove('show');
-  CURRENT_BARNAME = null;
+function renderTabs() {
+  const wrap = document.getElementById('tabsRow');
+  wrap.innerHTML = '';
+  Object.keys(STATUS_LABELS).forEach(key => {
+    const el = document.createElement('div');
+    el.className = 'tab' + (key === currentStatus ? ' active' : '');
+    el.textContent = STATUS_LABELS[key];
+    el.onclick = () => { currentStatus = key; renderTabs(); loadList(); };
+    wrap.appendChild(el);
+  });
 }
 
-function renderPanel(d){
-  const st = STATUS_LABELS[(d.review && d.review.status) || 'none'] || STATUS_LABELS.none;
-  $('pBadgeWrap').innerHTML = `<span class="badge ${st.cls}">${st.text}</span>`;
-  $('pDriver').textContent = `${d.driver_name || '-'} (${d.driver_id || '-'})`;
-  $('pCreated').textContent = d.created_at || '-';
-  $('pCompleted').textContent = d.completed_at || '—';
+async function loadList() {
+  const search = document.getElementById('searchInput').value.trim();
+  const params = new URLSearchParams({ status: currentStatus, search });
+  try {
+    const rows = await apiFetch('/api/barnames?' + params.toString());
+    renderStats(rows);
+    renderList(rows);
+  } catch (e) {
+    toast(e.message, false);
+  }
+}
 
-  const docsHtml = (d.documents||[]).map(doc => {
-    const fileUrl = `/api/barnames/${encodeURIComponent(d.barname)}/doc/${encodeURIComponent(doc.key)}/file?token=${encodeURIComponent(TOKEN)}`;
-    if(doc.file_type === 'photo'){
-      return `<div class="doc-card">
-        <a href="${fileUrl}" target="_blank"><img src="${fileUrl}" alt="${esc(doc.label)}"></a>
-        <div class="doc-label">${esc(doc.label)}</div>
-      </div>`;
-    }else if(doc.text){
-      return `<div class="doc-card">
-        <div class="doc-label">${esc(doc.label)}</div>
-        <div class="doc-text">${esc(doc.text)}</div>
-      </div>`;
-    }else{
-      return `<div class="doc-card">
-        <div class="doc-label">${esc(doc.label)}</div>
-        <a class="doc-link" href="${fileUrl}" target="_blank">📎 مشاهده / دانلود فایل</a>
-      </div>`;
+function renderStats(allRowsForCurrentFilter) {
+  // برای آمار کلی، از یک درخواست جدا با status=all استفاده می‌کنیم تا فیلتر فعلی روی آمار اثر نگذارد
+  apiFetch('/api/barnames?status=all').then(rows => {
+    const counts = { pending: 0, approved: 0, rejected: 0, partial: 0, none: 0 };
+    rows.forEach(r => { counts[r.status] = (counts[r.status] || 0) + 1; });
+    const wrap = document.getElementById('statsRow');
+    wrap.innerHTML = '';
+    const items = [
+      ['کل بارنامه‌ها', rows.length],
+      ['در انتظار بررسی', counts.pending],
+      ['تایید شده', counts.approved],
+      ['رد شده', counts.rejected],
+      ['کسری بار', counts.partial],
+    ];
+    items.forEach(([label, num]) => {
+      const card = document.createElement('div');
+      card.className = 'stat-card';
+      card.innerHTML = `<div class="num">${num}</div><div class="label">${label}</div>`;
+      wrap.appendChild(card);
+    });
+  }).catch(() => {});
+}
+
+function renderList(rows) {
+  const body = document.getElementById('listBody');
+  body.innerHTML = '';
+  document.getElementById('empty').style.display = rows.length ? 'none' : 'block';
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    tr.className = 'row';
+    tr.onclick = () => openDetail(r.barname);
+    tr.innerHTML = `
+      <td data-label="وضعیت"><span class="badge ${BADGE_CLASS[r.status] || 'badge-none'}">${r.status_label}</span></td>
+      <td data-label="بارنامه"><b>${r.barname}</b></td>
+      <td data-label="راننده">${r.driver_name || '-'}</td>
+      <td data-label="مستندات">${r.doc_count}</td>
+      <td data-label="تاریخ">${r.created_at || '-'}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+async function openDetail(barname) {
+  currentBarname = barname;
+  const overlay = document.getElementById('detailOverlay');
+  overlay.classList.add('open');
+  document.getElementById('detailContent').innerHTML = 'در حال بارگذاری...';
+  try {
+    const data = await apiFetch('/api/barnames/' + encodeURIComponent(barname));
+    renderDetail(data);
+  } catch (e) {
+    document.getElementById('detailContent').innerHTML = 'خطا: ' + e.message;
+  }
+}
+
+function closeDetail() {
+  document.getElementById('detailOverlay').classList.remove('open');
+  currentBarname = null;
+}
+
+function renderDetail(data) {
+  const review = data.review || {};
+  const status = review.status || 'none';
+  const docsHtml = (data.documents || []).map(d => {
+    let inner;
+    if (d.file_type === 'text') {
+      inner = `<div class="doc-text">${escapeHtml(d.text || '-')}</div>`;
+    } else {
+      const url = `/api/barnames/${encodeURIComponent(data.barname)}/doc/${encodeURIComponent(d.key)}/file?token=${encodeURIComponent(TOKEN)}`;
+      inner = `<img src="${url}" loading="lazy" onclick="window.open('${url}','_blank')">`;
     }
-  }).join('') || `<div class="no-log">مستندی ثبت نشده.</div>`;
+    return `<div class="doc-card">${inner}<div class="doc-label">${d.label}</div></div>`;
+  }).join('');
 
-  const review = d.review || {};
-  let noteHtml = '';
-  if(review.status === 'rejected' && review.reason){
-    noteHtml = `<div class="review-note"><b>علت عدم تایید:</b> ${esc(review.reason)}</div>`;
-  }else if(review.status === 'partial'){
-    const resp = review.driver_response === 'accepted' ? '✅ راننده پذیرفته'
-               : review.driver_response === 'rejected' ? '❌ راننده نپذیرفته — ' + esc(review.driver_reason||'')
-               : '🕐 هنوز پاسخی از راننده نرسیده';
-    noteHtml = `<div class="review-note"><b>مقدار کسری بار:</b> ${esc(review.deduction_note||'-')}<br><b>پاسخ راننده:</b> ${resp}</div>`;
+  let actionsHtml = '';
+  if (status === 'pending') {
+    actionsHtml = `
+      <div class="action-row">
+        <button class="btn-green" onclick="doApprove()">✅ تایید</button>
+        <button class="btn-red" onclick="toggleForm('rejectForm')">❌ عدم تایید</button>
+        <button class="btn-orange" onclick="toggleForm('partialForm')">⚠️ تایید با کسری بار</button>
+      </div>
+      <div class="subform" id="rejectForm">
+        <textarea id="rejectReason" placeholder="علت عدم تایید را بنویسید..."></textarea>
+        <button class="btn-red" onclick="doReject()">ارسال عدم تایید</button>
+      </div>
+      <div class="subform" id="partialForm">
+        <textarea id="partialNote" placeholder="مقدار کسری بار را بنویسید (مثلاً: ۲ تن)..."></textarea>
+        <button class="btn-orange" onclick="doPartial()">ارسال تایید با کسری بار</button>
+      </div>
+    `;
+  } else {
+    actionsHtml = `<p class="info-line">این بارنامه قبلاً بررسی شده و دیگر قابل تغییر از این بخش نیست.</p>`;
+    if (review.reason) actionsHtml += `<p class="info-line"><b>علت رد:</b> ${escapeHtml(review.reason)}</p>`;
+    if (review.deduction_note) actionsHtml += `<p class="info-line"><b>مقدار کسری:</b> ${escapeHtml(review.deduction_note)}</p>`;
   }
 
-  const canAct = review.status === 'pending';
-  const actionsHtml = canAct ? `
-    <div class="actions-grid">
-      <button class="act-btn approve" onclick="doApprove()">✅ تایید</button>
-      <button class="act-btn reject" onclick="toggleForm('rejectForm')">❌ عدم تایید</button>
-      <button class="act-btn partial" onclick="toggleForm('partialForm')">⚠️ کسری بار</button>
-    </div>
-    <div class="act-form" id="rejectForm">
-      <textarea id="rejectReason" placeholder="علت عدم تایید را بنویس…"></textarea>
-      <div class="row-btns">
-        <button class="btn btn-amber" style="background:var(--red)" onclick="doReject()">ثبت عدم تایید</button>
-      </div>
-    </div>
-    <div class="act-form" id="partialForm">
-      <textarea id="partialNote" placeholder="مقدار کسری بار را بنویس، مثلاً: ۲ تن"></textarea>
-      <div class="row-btns">
-        <button class="btn btn-amber" onclick="doPartial()">ثبت کسری بار</button>
-      </div>
-    </div>
-  ` : `<div class="no-log">این بارنامه دیگر در وضعیت «در انتظار بررسی» نیست، برای همین دکمه‌های تایید/عدم‌تایید غیرفعال است.</div>`;
+  const logItems = (data.log || []).slice().reverse();
+  const logHtml = logItems.length
+    ? `<div class="timeline">${logItems.map(logItemHtml).join('')}</div>`
+    : `<p class="no-log">هنوز رویدادی برای این بارنامه ثبت نشده.</p>`;
 
-  const logItems = (d.log || []).slice().reverse();
-  const logHtml = logItems.length ? `<div class="timeline">${logItems.map(logItemHtml).join('')}</div>`
-                                   : `<div class="no-log">هنوز رویدادی برای این بارنامه ثبت نشده.</div>`;
-
-  $('pBody').innerHTML = `
-    <div class="section-title">📎 مستندات</div>
-    <div class="docs-grid">${docsHtml}</div>
-
-    <div class="section-title">⚙️ اقدام</div>
-    ${noteHtml}
+  document.getElementById('detailContent').innerHTML = `
+    <h2>📦 بارنامه ${data.barname} <span class="badge ${BADGE_CLASS[status] || 'badge-none'}">${data.status_label}</span></h2>
+    <div class="info-line">👤 راننده: <b>${data.driver_name || '-'}</b> (آیدی: ${data.driver_id || '-'})</div>
+    <div class="info-line">🕐 تاریخ ثبت: ${data.created_at || '-'}</div>
+    ${data.completed_at ? `<div class="info-line">📤 تاریخ ارسال نهایی: ${data.completed_at}</div>` : ''}
+    <div class="doc-grid">${docsHtml || '<p class="info-line">مستندی یافت نشد</p>'}</div>
     ${actionsHtml}
-
-    <div class="section-title">✉️ پیام دستی به راننده</div>
-    <div class="msg-box">
-      <textarea id="customMsg" placeholder="متن پیامی که مستقیم برای راننده ارسال شود…"></textarea>
-      <button class="btn btn-amber" onclick="sendCustomMessage()">ارسال پیام</button>
+    <div class="msgbox">
+      <div class="info-line" style="margin-bottom:6px;">✉️ ارسال پیام آزاد به راننده</div>
+      <textarea id="freeMessage" placeholder="متن پیام..."></textarea>
+      <button class="btn-primary" onclick="sendFreeMessage()">ارسال پیام</button>
     </div>
-
     <div class="section-title">📜 تاریخچه بارنامه</div>
     ${logHtml}
   `;
 }
 
-function eventClass(ev){
-  if(ev.includes('تایید با کسری')) return 'ev-partial';
-  if(ev.includes('عدم تایید') || ev.includes('عدم پذیرش')) return 'ev-rejected';
-  if(ev.includes('تایید') || ev.includes('پذیرش')) return 'ev-approved';
-  if(ev.includes('راننده')) return 'ev-driver';
+function eventClass(ev) {
+  ev = ev || '';
+  if (ev.includes('تایید با کسری')) return 'ev-partial';
+  if (ev.includes('عدم تایید') || ev.includes('عدم پذیرش')) return 'ev-rejected';
+  if (ev.includes('تایید') || ev.includes('پذیرش')) return 'ev-approved';
+  if (ev.includes('راننده')) return 'ev-driver';
   return '';
 }
 
-function logItemHtml(item){
+function logItemHtml(item) {
   return `
-    <div class="tl-item ${eventClass(item.event||'')}">
+    <div class="tl-item ${eventClass(item.event)}">
       <div class="tl-dot"></div>
       <div class="tl-card">
-        <div class="tl-time">${esc(item.time)}</div>
-        <div class="tl-event">${esc(item.event)}</div>
-        ${item.actor ? `<div class="tl-actor">${esc(item.actor)}</div>` : ''}
-        ${item.detail ? `<div class="tl-detail">${esc(item.detail)}</div>` : ''}
+        <div class="tl-time">${escapeHtml(item.time || '')}</div>
+        <div class="tl-event">${escapeHtml(item.event || '')}</div>
+        ${item.actor ? `<div class="tl-actor">${escapeHtml(item.actor)}</div>` : ''}
+        ${item.detail ? `<div class="tl-detail">${escapeHtml(item.detail)}</div>` : ''}
       </div>
     </div>`;
 }
 
-function toggleForm(id){
-  document.querySelectorAll('.act-form').forEach(f => { if(f.id !== id) f.classList.remove('show'); });
-  $(id).classList.toggle('show');
+function toggleForm(id) {
+  document.querySelectorAll('.subform').forEach(el => el.classList.remove('open'));
+  document.getElementById(id).classList.add('open');
 }
 
-async function doApprove(){
-  if(!confirm('تایید نهایی این بارنامه ثبت شود؟')) return;
-  try{
-    await api(`/api/barnames/${encodeURIComponent(CURRENT_BARNAME)}/approve`, {method:'POST'});
-    toast('تایید شد ✅');
-    await openPanel(CURRENT_BARNAME);
-    await loadAll();
-  }catch(e){ toast(e.message, true); }
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
 }
 
-async function doReject(){
-  const reason = $('rejectReason').value.trim();
-  if(!reason){ toast('علت عدم تایید را بنویس', true); return; }
-  try{
-    await api(`/api/barnames/${encodeURIComponent(CURRENT_BARNAME)}/reject`, {
-      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({reason})
+async function doApprove() {
+  if (!confirm('تایید این بارنامه ثبت شود؟')) return;
+  try {
+    await apiFetch(`/api/barnames/${encodeURIComponent(currentBarname)}/approve`, { method: 'POST' });
+    toast('تایید شد و به راننده اطلاع داده شد', true);
+    closeDetail(); loadList();
+  } catch (e) { toast(e.message, false); }
+}
+
+async function doReject() {
+  const reason = document.getElementById('rejectReason').value.trim();
+  if (!reason) { toast('علت را بنویسید', false); return; }
+  try {
+    await apiFetch(`/api/barnames/${encodeURIComponent(currentBarname)}/reject`, {
+      method: 'POST', body: JSON.stringify({ reason })
     });
-    toast('عدم تایید ثبت شد');
-    await openPanel(CURRENT_BARNAME);
-    await loadAll();
-  }catch(e){ toast(e.message, true); }
+    toast('عدم تایید ثبت و به راننده اطلاع داده شد', true);
+    closeDetail(); loadList();
+  } catch (e) { toast(e.message, false); }
 }
 
-async function doPartial(){
-  const note = $('partialNote').value.trim();
-  if(!note){ toast('مقدار کسری بار را بنویس', true); return; }
-  try{
-    await api(`/api/barnames/${encodeURIComponent(CURRENT_BARNAME)}/partial`, {
-      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({note})
+async function doPartial() {
+  const note = document.getElementById('partialNote').value.trim();
+  if (!note) { toast('مقدار کسری را بنویسید', false); return; }
+  try {
+    await apiFetch(`/api/barnames/${encodeURIComponent(currentBarname)}/partial`, {
+      method: 'POST', body: JSON.stringify({ note })
     });
-    toast('تایید با کسری بار ثبت شد');
-    await openPanel(CURRENT_BARNAME);
-    await loadAll();
-  }catch(e){ toast(e.message, true); }
+    toast('تایید با کسری بار ثبت و به راننده اطلاع داده شد', true);
+    closeDetail(); loadList();
+  } catch (e) { toast(e.message, false); }
 }
 
-async function sendCustomMessage(){
-  const text = $('customMsg').value.trim();
-  if(!text){ toast('متن پیام را بنویس', true); return; }
-  try{
-    await api(`/api/barnames/${encodeURIComponent(CURRENT_BARNAME)}/message`, {
-      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text})
+async function sendFreeMessage() {
+  const text = document.getElementById('freeMessage').value.trim();
+  if (!text) { toast('متن پیام را بنویسید', false); return; }
+  try {
+    await apiFetch(`/api/barnames/${encodeURIComponent(currentBarname)}/message`, {
+      method: 'POST', body: JSON.stringify({ text })
     });
-    toast('پیام برای راننده ارسال شد ✉️');
-    $('customMsg').value = '';
-    await openPanel(CURRENT_BARNAME);
-  }catch(e){ toast(e.message, true); }
+    toast('پیام برای راننده ارسال شد', true);
+    document.getElementById('freeMessage').value = '';
+  } catch (e) { toast(e.message, false); }
 }
 
-document.addEventListener('keydown', e => { if(e.key === 'Escape') closePanel(); });
-
-if(TOKEN){ loadAll(); } else { $('tokenStatus').textContent = 'توکن وارد نشده'; }
+if (TOKEN) checkAndEnter();
 </script>
 </body>
 </html>
