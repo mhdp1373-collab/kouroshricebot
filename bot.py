@@ -2039,7 +2039,7 @@ async def api_custom_message(barname: str, payload: dict = Body(...), x_dashboar
     return {"ok": True}
 
 
-
+async def _on_startup(application):
     """قبل از شروع polling، هر webhook فعال روی این ربات را حذف می‌کند تا هرگز polling و webhook هم‌زمان فعال نباشند
     (فعال بودن هم‌زمان هر دو، دلیل رایج ارسال دوبار هر پیام است)."""
     try:
