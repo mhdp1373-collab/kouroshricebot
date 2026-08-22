@@ -169,6 +169,19 @@ def save_barname_data(barname: str, data: dict):
     db[barname] = data
     save_db(db)
 
+def add_barname_log(data: dict, event: str, actor: str = "", detail: str = ""):
+    """افزودن یک رویداد به تاریخچه‌ی بارنامه (برای نمایش در داشبورد).
+    این تابع فقط دیکشنری data را در حافظه تغییر می‌دهد؛ خودِ save_barname_data
+    باید بلافاصله بعدش صدا زده شود تا رویداد روی دیسک ذخیره شود."""
+    if "log" not in data or not isinstance(data.get("log"), list):
+        data["log"] = []
+    data["log"].append({
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "event": event,
+        "actor": actor,
+        "detail": detail,
+    })
+
 def make_review_id() -> str:
     """شناسه یکتا برای هر درخواست بررسی (هر بار ارسال نهایی، شناسه جدید می‌گیرد)"""
     return uuid.uuid4().hex[:10]
@@ -906,6 +919,10 @@ async def dispatch_review_package(context, barname: str, db_data: dict) -> str:
         "reviewed_at": None,
         "admin_messages": {},
     }
+    add_barname_log(
+        db_data, "ارسال/نمایش مجدد مستندات برای بررسی",
+        detail=f"برای {len(ADMIN_IDS)} ادمین ارسال شد"
+    )
     save_barname_data(barname, db_data)
 
     docs = db_data.get("documents", {})
@@ -974,6 +991,11 @@ async def final_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     db_data["documents"] = session_docs
     db_data["completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
     db_data["status"] = "completed"
+    add_barname_log(
+        db_data, "ارسال نهایی مستندات",
+        actor=f"{update.effective_user.full_name} (راننده)",
+        detail=f"{len(session_docs)} مستند ارسال شد"
+    )
     save_barname_data(barname, db_data)
 
     # فوروارد به کانال آرشیو (در صورت تنظیم) — فقط بعد از تایید نهایی
@@ -1049,6 +1071,7 @@ async def review_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_data["review"]["status"] = "approved"
     db_data["review"]["reviewed_by"] = user.id
     db_data["review"]["reviewed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    add_barname_log(db_data, "تایید مستندات", actor=f"{user.first_name} (ادمین، از طریق ربات)")
     save_barname_data(barname, db_data)
 
     driver_id = db_data.get("driver_id")
@@ -1140,6 +1163,7 @@ async def driver_partial_accept(update: Update, context: ContextTypes.DEFAULT_TY
 
     db_data["review"]["driver_response"] = "accepted"
     db_data["review"]["status"] = "approved"
+    add_barname_log(db_data, "پذیرش کسری بار توسط راننده", actor=f"{query.from_user.full_name} (راننده)")
     save_barname_data(barname, db_data)
 
     await query.message.reply_text(
@@ -1439,6 +1463,10 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         db_data["review"]["driver_response"] = "rejected"
         db_data["review"]["driver_reason"] = note_text
+        add_barname_log(
+            db_data, "عدم پذیرش کسری بار توسط راننده",
+            actor=f"{user.full_name} (راننده)", detail=note_text
+        )
         save_barname_data(barname, db_data)
 
         driver_link = f"{user.full_name} (آیدی: `{user.id}`)"
@@ -1490,6 +1518,10 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if r_action == "reject":
             db_data["review"]["status"] = "rejected"
             db_data["review"]["reason"] = note_text
+            add_barname_log(
+                db_data, "عدم تایید مستندات",
+                actor=f"{user.first_name} (ادمین، از طریق ربات)", detail=note_text
+            )
             save_barname_data(barname, db_data)
 
             if driver_id:
@@ -1524,6 +1556,10 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             db_data["review"]["status"] = "partial"
             db_data["review"]["deduction_note"] = note_text
             db_data["review"]["driver_response"] = None
+            add_barname_log(
+                db_data, "تایید با کسری بار",
+                actor=f"{user.first_name} (ادمین، از طریق ربات)", detail=note_text
+            )
             save_barname_data(barname, db_data)
 
             if driver_id:
@@ -1867,7 +1903,21 @@ async def api_get_barname(barname: str, x_dashboard_token: str = Header(default=
         "review": data.get("review", {}),
         "status_label": review_status_label(data),
         "documents": docs,
+        "log": data.get("log", []),
     }
+
+
+@dashboard_api.get("/api/barnames/{barname}/log")
+async def api_get_barname_log(barname: str, x_dashboard_token: str = Header(default="")):
+    """تاریخچه‌ی کامل تغییرات یک بارنامه (برای نمایش لاگ در داشبورد)"""
+    _check_dashboard_token(x_dashboard_token)
+    data = get_barname_data(barname)
+    if not data.get("created_at"):
+        raise HTTPException(status_code=404, detail="بارنامه یافت نشد.")
+    log = data.get("log", [])
+    # جدیدترین رویداد اول نمایش داده شود
+    log_sorted = list(reversed(log))
+    return {"barname": barname, "count": len(log_sorted), "log": log_sorted}
 
 
 @dashboard_api.get("/api/barnames/{barname}/doc/{doc_key}/file")
@@ -1900,6 +1950,7 @@ async def api_approve(barname: str, x_dashboard_token: str = Header(default=""))
     review["reviewed_by"] = "dashboard"
     review["reviewed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
     data["review"] = review
+    add_barname_log(data, "تایید مستندات", actor="ادمین (از طریق داشبورد وب)")
     save_barname_data(barname, data)
 
     driver_id = data.get("driver_id")
@@ -1938,6 +1989,7 @@ async def api_reject(barname: str, payload: dict = Body(...), x_dashboard_token:
     review["reviewed_by"] = "dashboard"
     review["reviewed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
     data["review"] = review
+    add_barname_log(data, "عدم تایید مستندات", actor="ادمین (از طریق داشبورد وب)", detail=reason)
     save_barname_data(barname, data)
 
     driver_id = data.get("driver_id")
@@ -1987,6 +2039,7 @@ async def api_partial(barname: str, payload: dict = Body(...), x_dashboard_token
     review["reviewed_by"] = "dashboard"
     review["reviewed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
     data["review"] = review
+    add_barname_log(data, "تایید با کسری بار", actor="ادمین (از طریق داشبورد وب)", detail=note)
     save_barname_data(barname, data)
 
     driver_id = data.get("driver_id")
@@ -2035,6 +2088,9 @@ async def api_custom_message(barname: str, payload: dict = Body(...), x_dashboar
         await BOT_INSTANCE.send_message(chat_id=driver_id, text=text)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"خطا در ارسال پیام: {e}")
+
+    add_barname_log(data, "پیام دستی به راننده", actor="ادمین (از طریق داشبورد وب)", detail=text)
+    save_barname_data(barname, data)
 
     return {"ok": True}
 
