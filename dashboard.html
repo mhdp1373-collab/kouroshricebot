@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>داشبورد پی‌بار</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1f232c; --border: #2a2f3a;
+    --text: #e8eaed; --muted: #9aa0ab; --primary: #4f8cff; --green: #34c76f;
+    --red: #ff5c5c; --orange: #ffb020; --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text); font-family: Tahoma, "Segoe UI", sans-serif;
+    margin: 0; padding: 0; min-height: 100vh;
+  }
+  header {
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 14px 20px; display: flex; align-items: center; justify-content: space-between;
+    position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { font-size: 18px; margin: 0; }
+  #loginBox, #app { padding: 20px; max-width: 1100px; margin: 0 auto; }
+  #loginBox { max-width: 380px; margin-top: 80px; text-align: center; }
+  input, textarea, select, button {
+    font-family: inherit; font-size: 14px; border-radius: var(--radius);
+    border: 1px solid var(--border); background: var(--panel2); color: var(--text);
+    padding: 10px 12px; outline: none;
+  }
+  input:focus, textarea:focus { border-color: var(--primary); }
+  button { cursor: pointer; border: none; font-weight: 600; transition: opacity .15s; }
+  button:hover { opacity: .85; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-primary { background: var(--primary); color: #fff; }
+  .btn-green { background: var(--green); color: #06210f; }
+  .btn-red { background: var(--red); color: #2b0505; }
+  .btn-orange { background: var(--orange); color: #2b1c00; }
+  .btn-ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  .stats { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+  .stat-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px 18px; flex: 1; min-width: 120px; text-align: center;
+  }
+  .stat-card .num { font-size: 22px; font-weight: 700; }
+  .stat-card .label { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .toolbar { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
+  .toolbar input[type=text] { flex: 1; min-width: 180px; }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+  .tab {
+    padding: 8px 14px; border-radius: 999px; border: 1px solid var(--border);
+    background: var(--panel2); color: var(--muted); cursor: pointer; font-size: 13px;
+  }
+  .tab.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: var(--radius); overflow: hidden; }
+  th, td { padding: 12px 14px; text-align: right; border-bottom: 1px solid var(--border); font-size: 13px; }
+  th { color: var(--muted); font-weight: 600; background: var(--panel2); }
+  tr.row { cursor: pointer; }
+  tr.row:hover { background: var(--panel2); }
+  .badge { padding: 3px 10px; border-radius: 999px; font-size: 12px; white-space: nowrap; }
+  .badge-pending { background: #3a3210; color: var(--orange); }
+  .badge-approved { background: #0f3a22; color: var(--green); }
+  .badge-rejected { background: #3a1212; color: var(--red); }
+  .badge-partial { background: #3a2a10; color: var(--orange); }
+  .badge-none { background: #262b34; color: var(--muted); }
+  #empty { text-align: center; color: var(--muted); padding: 40px 0; }
+
+  .overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none;
+    align-items: flex-start; justify-content: center; z-index: 50; overflow-y: auto; padding: 30px 14px;
+  }
+  .overlay.open { display: flex; }
+  .modal {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    max-width: 640px; width: 100%; padding: 20px;
+  }
+  .modal h2 { margin-top: 0; font-size: 17px; }
+  .modal .close { float: left; cursor: pointer; color: var(--muted); font-size: 20px; }
+  .doc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin: 14px 0; }
+  .doc-card { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--panel2); }
+  .doc-card img { width: 100%; height: 130px; object-fit: cover; display: block; }
+  .doc-card .doc-text { padding: 12px; font-size: 13px; min-height: 60px; display: flex; align-items: center; justify-content: center; text-align: center; }
+  .doc-card .doc-label { font-size: 12px; color: var(--muted); padding: 6px 8px; border-top: 1px solid var(--border); }
+  .info-line { font-size: 13px; color: var(--muted); margin: 4px 0; }
+  .info-line b { color: var(--text); }
+  .action-row { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+  .action-row > button { flex: 1; min-width: 110px; }
+  .subform { margin-top: 12px; display: none; }
+  .subform.open { display: block; }
+  .subform textarea { width: 100%; min-height: 70px; margin-bottom: 8px; resize: vertical; }
+  .msgbox { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 14px; }
+  .msgbox textarea { width: 100%; min-height: 60px; margin-bottom: 8px; resize: vertical; }
+  .toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: var(--panel2); border: 1px solid var(--border); padding: 10px 20px;
+    border-radius: var(--radius); font-size: 13px; z-index: 100; display: none;
+  }
+  .toast.show { display: block; }
+  .toast.err { border-color: var(--red); color: var(--red); }
+  .toast.ok { border-color: var(--green); color: var(--green); }
+  @media (max-width: 640px) {
+    table, thead, tbody, th, td, tr { display: block; }
+    thead { display: none; }
+    tr.row { border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 10px; padding: 8px; }
+    td { border: none; padding: 4px 6px; }
+    td::before { content: attr(data-label); color: var(--muted); display: inline-block; min-width: 90px; font-size: 11px; }
+  }
+</style>
+</head>
+<body>
+
+<div id="loginBox">
+  <h1>🔐 داشبورد پی‌بار</h1>
+  <p style="color:var(--muted); font-size:13px;">توکن دسترسی ادمین را وارد کنید</p>
+  <input type="password" id="tokenInput" placeholder="توکن" style="width:100%; margin-bottom:10px;">
+  <button class="btn-primary" style="width:100%;" onclick="doLogin()">ورود</button>
+  <div id="loginError" style="color:var(--red); font-size:12px; margin-top:8px;"></div>
+</div>
+
+<div id="app" style="display:none;">
+  <header>
+    <h1>📦 داشبورد بارنامه‌ها</h1>
+    <button class="btn-ghost" onclick="logout()">خروج</button>
+  </header>
+
+  <div style="padding:20px; max-width:1100px; margin:0 auto;">
+    <div class="stats" id="statsRow"></div>
+
+    <div class="toolbar">
+      <input type="text" id="searchInput" placeholder="جستجوی شماره بارنامه..." oninput="debouncedLoad()">
+      <button class="btn-ghost" onclick="loadList()">🔄 بروزرسانی</button>
+    </div>
+
+    <div class="tabs" id="tabsRow" style="margin-bottom:16px;"></div>
+
+    <div id="listWrap">
+      <table>
+        <thead>
+          <tr>
+            <th>وضعیت</th><th>شماره بارنامه</th><th>راننده</th><th>مستندات</th><th>تاریخ ثبت</th>
+          </tr>
+        </thead>
+        <tbody id="listBody"></tbody>
+      </table>
+      <div id="empty" style="display:none;">چیزی برای نمایش نیست</div>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="detailOverlay">
+  <div class="modal">
+    <span class="close" onclick="closeDetail()">✕</span>
+    <div id="detailContent">در حال بارگذاری...</div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let TOKEN = localStorage.getItem('pibar_token') || '';
+let currentStatus = 'all';
+let currentBarname = null;
+let debounceTimer = null;
+
+const STATUS_LABELS = {
+  all: 'همه', pending: '🕐 در انتظار', approved: '✅ تایید شده',
+  rejected: '❌ رد شده', partial: '⚠️ کسری بار', none: 'ثبت‌نشده'
+};
+const BADGE_CLASS = {
+  pending: 'badge-pending', approved: 'badge-approved',
+  rejected: 'badge-rejected', partial: 'badge-partial', none: 'badge-none'
+};
+
+function toast(msg, ok) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show ' + (ok ? 'ok' : 'err');
+  setTimeout(() => t.className = 'toast', 2500);
+}
+
+function debouncedLoad() {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(loadList, 350);
+}
+
+async function apiFetch(path, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({'X-Dashboard-Token': TOKEN, 'Content-Type': 'application/json'}, opts.headers || {});
+  const res = await fetch(path, opts);
+  if (res.status === 401) { logout(); throw new Error('توکن نامعتبر'); }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || 'خطا در ارتباط با سرور');
+  return data;
+}
+
+function doLogin() {
+  const val = document.getElementById('tokenInput').value.trim();
+  if (!val) return;
+  TOKEN = val;
+  localStorage.setItem('pibar_token', TOKEN);
+  checkAndEnter();
+}
+
+function logout() {
+  localStorage.removeItem('pibar_token');
+  TOKEN = '';
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('loginBox').style.display = 'block';
+}
+
+async function checkAndEnter() {
+  try {
+    await apiFetch('/api/barnames?status=all');
+    document.getElementById('loginBox').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    renderTabs();
+    loadList();
+  } catch (e) {
+    document.getElementById('loginError').textContent = 'توکن اشتباه است یا سرور در دسترس نیست';
+  }
+}
+
+function renderTabs() {
+  const wrap = document.getElementById('tabsRow');
+  wrap.innerHTML = '';
+  Object.keys(STATUS_LABELS).forEach(key => {
+    const el = document.createElement('div');
+    el.className = 'tab' + (key === currentStatus ? ' active' : '');
+    el.textContent = STATUS_LABELS[key];
+    el.onclick = () => { currentStatus = key; renderTabs(); loadList(); };
+    wrap.appendChild(el);
+  });
+}
+
+async function loadList() {
+  const search = document.getElementById('searchInput').value.trim();
+  const params = new URLSearchParams({ status: currentStatus, search });
+  try {
+    const rows = await apiFetch('/api/barnames?' + params.toString());
+    renderStats(rows);
+    renderList(rows);
+  } catch (e) {
+    toast(e.message, false);
+  }
+}
+
+function renderStats(allRowsForCurrentFilter) {
+  // برای آمار کلی، از یک درخواست جدا با status=all استفاده می‌کنیم تا فیلتر فعلی روی آمار اثر نگذارد
+  apiFetch('/api/barnames?status=all').then(rows => {
+    const counts = { pending: 0, approved: 0, rejected: 0, partial: 0, none: 0 };
+    rows.forEach(r => { counts[r.status] = (counts[r.status] || 0) + 1; });
+    const wrap = document.getElementById('statsRow');
+    wrap.innerHTML = '';
+    const items = [
+      ['کل بارنامه‌ها', rows.length],
+      ['در انتظار بررسی', counts.pending],
+      ['تایید شده', counts.approved],
+      ['رد شده', counts.rejected],
+      ['کسری بار', counts.partial],
+    ];
+    items.forEach(([label, num]) => {
+      const card = document.createElement('div');
+      card.className = 'stat-card';
+      card.innerHTML = `<div class="num">${num}</div><div class="label">${label}</div>`;
+      wrap.appendChild(card);
+    });
+  }).catch(() => {});
+}
+
+function renderList(rows) {
+  const body = document.getElementById('listBody');
+  body.innerHTML = '';
+  document.getElementById('empty').style.display = rows.length ? 'none' : 'block';
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    tr.className = 'row';
+    tr.onclick = () => openDetail(r.barname);
+    tr.innerHTML = `
+      <td data-label="وضعیت"><span class="badge ${BADGE_CLASS[r.status] || 'badge-none'}">${r.status_label}</span></td>
+      <td data-label="بارنامه"><b>${r.barname}</b></td>
+      <td data-label="راننده">${r.driver_name || '-'}</td>
+      <td data-label="مستندات">${r.doc_count}</td>
+      <td data-label="تاریخ">${r.created_at || '-'}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+async function openDetail(barname) {
+  currentBarname = barname;
+  const overlay = document.getElementById('detailOverlay');
+  overlay.classList.add('open');
+  document.getElementById('detailContent').innerHTML = 'در حال بارگذاری...';
+  try {
+    const data = await apiFetch('/api/barnames/' + encodeURIComponent(barname));
+    renderDetail(data);
+  } catch (e) {
+    document.getElementById('detailContent').innerHTML = 'خطا: ' + e.message;
+  }
+}
+
+function closeDetail() {
+  document.getElementById('detailOverlay').classList.remove('open');
+  currentBarname = null;
+}
+
+function renderDetail(data) {
+  const review = data.review || {};
+  const status = review.status || 'none';
+  const docsHtml = (data.documents || []).map(d => {
+    let inner;
+    if (d.file_type === 'text') {
+      inner = `<div class="doc-text">${escapeHtml(d.text || '-')}</div>`;
+    } else {
+      const url = `/api/barnames/${encodeURIComponent(data.barname)}/doc/${encodeURIComponent(d.key)}/file?token=${encodeURIComponent(TOKEN)}`;
+      inner = `<img src="${url}" loading="lazy" onclick="window.open('${url}','_blank')">`;
+    }
+    return `<div class="doc-card">${inner}<div class="doc-label">${d.label}</div></div>`;
+  }).join('');
+
+  let actionsHtml = '';
+  if (status === 'pending') {
+    actionsHtml = `
+      <div class="action-row">
+        <button class="btn-green" onclick="doApprove()">✅ تایید</button>
+        <button class="btn-red" onclick="toggleForm('rejectForm')">❌ عدم تایید</button>
+        <button class="btn-orange" onclick="toggleForm('partialForm')">⚠️ تایید با کسری بار</button>
+      </div>
+      <div class="subform" id="rejectForm">
+        <textarea id="rejectReason" placeholder="علت عدم تایید را بنویسید..."></textarea>
+        <button class="btn-red" onclick="doReject()">ارسال عدم تایید</button>
+      </div>
+      <div class="subform" id="partialForm">
+        <textarea id="partialNote" placeholder="مقدار کسری بار را بنویسید (مثلاً: ۲ تن)..."></textarea>
+        <button class="btn-orange" onclick="doPartial()">ارسال تایید با کسری بار</button>
+      </div>
+    `;
+  } else {
+    actionsHtml = `<p class="info-line">این بارنامه قبلاً بررسی شده و دیگر قابل تغییر از این بخش نیست.</p>`;
+    if (review.reason) actionsHtml += `<p class="info-line"><b>علت رد:</b> ${escapeHtml(review.reason)}</p>`;
+    if (review.deduction_note) actionsHtml += `<p class="info-line"><b>مقدار کسری:</b> ${escapeHtml(review.deduction_note)}</p>`;
+  }
+
+  document.getElementById('detailContent').innerHTML = `
+    <h2>📦 بارنامه ${data.barname} <span class="badge ${BADGE_CLASS[status] || 'badge-none'}">${data.status_label}</span></h2>
+    <div class="info-line">👤 راننده: <b>${data.driver_name || '-'}</b> (آیدی: ${data.driver_id || '-'})</div>
+    <div class="info-line">🕐 تاریخ ثبت: ${data.created_at || '-'}</div>
+    ${data.completed_at ? `<div class="info-line">📤 تاریخ ارسال نهایی: ${data.completed_at}</div>` : ''}
+    <div class="doc-grid">${docsHtml || '<p class="info-line">مستندی یافت نشد</p>'}</div>
+    ${actionsHtml}
+    <div class="msgbox">
+      <div class="info-line" style="margin-bottom:6px;">✉️ ارسال پیام آزاد به راننده</div>
+      <textarea id="freeMessage" placeholder="متن پیام..."></textarea>
+      <button class="btn-primary" onclick="sendFreeMessage()">ارسال پیام</button>
+    </div>
+  `;
+}
+
+function toggleForm(id) {
+  document.querySelectorAll('.subform').forEach(el => el.classList.remove('open'));
+  document.getElementById(id).classList.add('open');
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+async function doApprove() {
+  if (!confirm('تایید این بارنامه ثبت شود؟')) return;
+  try {
+    await apiFetch(`/api/barnames/${encodeURIComponent(currentBarname)}/approve`, { method: 'POST' });
+    toast('تایید شد و به راننده اطلاع داده شد', true);
+    closeDetail(); loadList();
+  } catch (e) { toast(e.message, false); }
+}
+
+async function doReject() {
+  const reason = document.getElementById('rejectReason').value.trim();
+  if (!reason) { toast('علت را بنویسید', false); return; }
+  try {
+    await apiFetch(`/api/barnames/${encodeURIComponent(currentBarname)}/reject`, {
+      method: 'POST', body: JSON.stringify({ reason })
+    });
+    toast('عدم تایید ثبت و به راننده اطلاع داده شد', true);
+    closeDetail(); loadList();
+  } catch (e) { toast(e.message, false); }
+}
+
+async function doPartial() {
+  const note = document.getElementById('partialNote').value.trim();
+  if (!note) { toast('مقدار کسری را بنویسید', false); return; }
+  try {
+    await apiFetch(`/api/barnames/${encodeURIComponent(currentBarname)}/partial`, {
+      method: 'POST', body: JSON.stringify({ note })
+    });
+    toast('تایید با کسری بار ثبت و به راننده اطلاع داده شد', true);
+    closeDetail(); loadList();
+  } catch (e) { toast(e.message, false); }
+}
+
+async function sendFreeMessage() {
+  const text = document.getElementById('freeMessage').value.trim();
+  if (!text) { toast('متن پیام را بنویسید', false); return; }
+  try {
+    await apiFetch(`/api/barnames/${encodeURIComponent(currentBarname)}/message`, {
+      method: 'POST', body: JSON.stringify({ text })
+    });
+    toast('پیام برای راننده ارسال شد', true);
+    document.getElementById('freeMessage').value = '';
+  } catch (e) { toast(e.message, false); }
+}
+
+if (TOKEN) checkAndEnter();
+</script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+python-telegram-bot==21.*
+python-dotenv
+fastapi
+uvicorn[standard]
+python-multipart
