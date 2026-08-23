@@ -2141,6 +2141,8 @@ async def api_list_barnames(
             "doc_count": len(data.get("documents", {})),
             "created_at": data.get("created_at", "-"),
             "reviewed_at": review.get("reviewed_at"),
+            "deduction_note": review.get("deduction_note", ""),
+            "product_type": data.get("product_type", ""),
         })
     rows.sort(key=lambda r: r["created_at"] or "", reverse=True)
     return rows
@@ -2173,8 +2175,31 @@ async def api_get_barname(barname: str, x_dashboard_token: str = Header(default=
         "status_label": review_status_label(data),
         "documents": docs,
         "admin_attachments": data.get("admin_attachments", []),
+        "product_type": data.get("product_type", ""),
         "log": data.get("log", []),
     }
+
+
+@dashboard_api.post("/api/barnames/{barname}/product-type")
+async def api_set_product_type(barname: str, x_dashboard_token: str = Header(default=""), body: dict = Body(...)):
+    """ثبت/ویرایش نوع محصول یک بارنامه (مثلاً برنج ایرانی، برنج خارجی، شکر، آرد و ...)"""
+    _check_dashboard_token(x_dashboard_token)
+    product_type = (body.get("type") or "").strip()
+
+    data = get_barname_data(barname)
+    if not data.get("created_at"):
+        raise HTTPException(status_code=404, detail="بارنامه یافت نشد.")
+
+    old_value = (data.get("product_type") or "").strip()
+    data["product_type"] = product_type
+    if product_type != old_value:
+        add_barname_log(
+            data, "ثبت/ویرایش نوع محصول",
+            actor="ادمین (از طریق داشبورد وب)",
+            detail=product_type or "(پاک شد)"
+        )
+    save_barname_data(barname, data)
+    return {"ok": True, "product_type": product_type}
 
 
 @dashboard_api.get("/api/barnames/{barname}/log")
