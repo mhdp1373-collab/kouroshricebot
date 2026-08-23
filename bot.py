@@ -1529,7 +1529,10 @@ async def admin_pending_page(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def admin_open_barname(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ارسال مجدد مستندات یک بارنامه خاص به همراه دکمه‌های بررسی"""
+    """نمایش مجدد مستندات یک بارنامه‌ی خاص برای ادمین.
+    نکته‌ی مهم: این تابع هرگز نباید بارنامه‌ای را که قبلاً «تایید با کسری بار»، «تایید شده»
+    یا «عدم تایید» شده دوباره به «در انتظار بررسی» برگرداند — فقط برای بارنامه‌های واقعاً
+    جدید/در انتظار، یک پکیج بررسی کامل (با دکمه‌های تایید/رد/کسری) ارسال می‌کند."""
     query = update.callback_query
     user = query.from_user
     if user.id not in ADMIN_IDS:
@@ -1543,13 +1546,59 @@ async def admin_open_barname(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.answer("⚠️ بارنامه یافت نشد.", show_alert=True)
         return
 
-    await query.answer("در حال ارسال مستندات...")
-
     db_data = get_barname_data(barname)
     if not db_data.get("documents"):
-        await context.bot.send_message(chat_id=user.id, text=f"⚠️ بارنامه {barname} مستندی ندارد.")
+        await query.answer("⚠️ این بارنامه مستندی ندارد.", show_alert=True)
         return
 
+    review = db_data.get("review", {})
+    status = review.get("status")
+    driver_link = f"{db_data.get('driver_name', '-')} (آیدی: `{db_data.get('driver_id')}`)"
+
+    if status == "partial":
+        # هنوز در انتظار تایید نهاییه — فقط اطلاعات فعلی + دکمه‌ی «تایید نهایی» دوباره فرستاده می‌شود
+        await query.answer("در حال ارسال مستندات...")
+        for doc_key, doc_info in db_data.get("documents", {}).items():
+            try:
+                await send_single_doc(
+                    context.bot, user.id, doc_key, doc_info, barname,
+                    extra_caption=f"👤 فرستنده: {driver_link}", parse_mode="Markdown"
+                )
+            except Exception as e:
+                logger.error(f"خطا در ارسال مستند {doc_key}: {e}")
+
+        resp = review.get("driver_response")
+        resp_label = "✅ پذیرفته" if resp == "accepted" else ("❌ نپذیرفته" if resp == "rejected" else "🕐 هنوز پاسخی نداده")
+        await _send_partial_finalize_prompt(
+            context, barname, db_data, review.get("id", ""),
+            text=(
+                f"📦 بارنامه {barname} همچنان در وضعیت «تایید با کسری بار» است.\n\n"
+                f"⚠️ مقدار کسری: {review.get('deduction_note', '-')}\n"
+                f"👤 پاسخ راننده: {resp_label}\n\n"
+                "برای تایید نهایی، دکمه‌ی زیر را بزنید 👇"
+            )
+        )
+        return
+
+    if status in ("approved", "rejected"):
+        # تصمیم قبلاً نهایی شده — فقط مستندات برای مرور دوباره فرستاده می‌شود، بدون تغییر وضعیت
+        await query.answer("در حال ارسال مستندات...")
+        for doc_key, doc_info in db_data.get("documents", {}).items():
+            try:
+                await send_single_doc(
+                    context.bot, user.id, doc_key, doc_info, barname,
+                    extra_caption=f"👤 فرستنده: {driver_link}", parse_mode="Markdown"
+                )
+            except Exception as e:
+                logger.error(f"خطا در ارسال مستند {doc_key}: {e}")
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=f"📦 بارنامه {barname} — {review_status_label(db_data)}\n(این بارنامه قبلاً نهایی شده و دیگر قابل تغییر نیست.)"
+        )
+        return
+
+    # status == "pending" یا اصلاً بررسی‌ای شروع نشده → پکیج بررسی کامل با دکمه‌های تایید/رد/کسری
+    await query.answer("در حال ارسال مستندات...")
     await dispatch_review_package(context, barname, db_data)
 
 
