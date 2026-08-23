@@ -219,6 +219,18 @@ async function apiFetch(path, opts) {
   return data;
 }
 
+async function apiUpload(path, formData) {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'X-Dashboard-Token': TOKEN },
+    body: formData
+  });
+  if (res.status === 401) { logout(); throw new Error('توکن نامعتبر'); }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || 'خطا در آپلود تصویر');
+  return data;
+}
+
 function doLogin() {
   const val = document.getElementById('tokenInput').value.trim();
   if (!val) return;
@@ -344,6 +356,12 @@ function renderDetail(data) {
     return `<div class="doc-card">${inner}<div class="doc-label">${d.label}</div></div>`;
   }).join('');
 
+  const attachmentsHtml = (data.attachments || []).map(a => {
+    const url = `/api/barnames/${encodeURIComponent(data.barname)}/attachment/${a.index}/file?token=${encodeURIComponent(TOKEN)}`;
+    const who = a.uploaded_by ? escapeHtml(a.uploaded_by) : 'ادمین';
+    return `<div class="doc-card"><img src="${url}" loading="lazy" onclick="window.open('${url}','_blank')"><div class="doc-label">📎 ${who}<br>${escapeHtml(a.uploaded_at || '')}</div></div>`;
+  }).join('');
+
   let actionsHtml = '';
   if (status === 'pending') {
     actionsHtml = `
@@ -360,6 +378,19 @@ function renderDetail(data) {
         <textarea id="partialNote" placeholder="مقدار کسری بار را بنویسید (مثلاً: ۲ تن)..."></textarea>
         <button class="btn-orange" onclick="doPartial()">ارسال تایید با کسری بار</button>
       </div>
+    `;
+  } else if (status === 'partial') {
+    const dr = review.driver_response;
+    let driverNote = '🕐 راننده هنوز به کسری بار پاسخ نداده است.';
+    if (dr === 'accepted') driverNote = '✅ راننده کسری بار را پذیرفته است.';
+    if (dr === 'rejected') driverNote = '❌ راننده کسری بار را قبول ندارد' + (review.driver_reason ? ` — علت: ${escapeHtml(review.driver_reason)}` : '') + '. لطفاً مستقیماً با راننده هماهنگ کنید.';
+    actionsHtml = `
+      <p class="info-line"><b>مقدار کسری اعلام‌شده:</b> ${escapeHtml(review.deduction_note || '-')}</p>
+      <p class="info-line">${driverNote}</p>
+      <div class="action-row">
+        <button class="btn-green" onclick="doFinalizePartial()">✅ تایید نهایی بارنامه</button>
+      </div>
+      <p class="info-line" style="color:var(--muted); font-size:12px;">تا زدن این دکمه، بارنامه «تایید شده» محسوب نمی‌شود و مبلغی واریز نخواهد شد.</p>
     `;
   } else {
     actionsHtml = `<p class="info-line">این بارنامه قبلاً بررسی شده و دیگر قابل تغییر از این بخش نیست.</p>`;
@@ -379,6 +410,13 @@ function renderDetail(data) {
     ${data.completed_at ? `<div class="info-line">📤 تاریخ ارسال نهایی: ${data.completed_at}</div>` : ''}
     <div class="doc-grid">${docsHtml || '<p class="info-line">مستندی یافت نشد</p>'}</div>
     ${actionsHtml}
+    <div class="section-title">📎 تصاویر افزوده‌شده توسط ادمین</div>
+    <div class="doc-grid">${attachmentsHtml || '<p class="info-line">هنوز تصویری اضافه نشده.</p>'}</div>
+    <div class="msgbox">
+      <div class="info-line" style="margin-bottom:6px;">📎 افزودن تصویر جدید به این بارنامه</div>
+      <input type="file" id="attachmentFile" accept="image/*" style="margin-bottom:8px; width:100%;">
+      <button class="btn-primary" onclick="doUploadAttachment()">آپلود تصویر</button>
+    </div>
     <div class="msgbox">
       <div class="info-line" style="margin-bottom:6px;">✉️ ارسال پیام آزاد به راننده</div>
       <textarea id="freeMessage" placeholder="متن پیام..."></textarea>
@@ -452,6 +490,29 @@ async function doPartial() {
     });
     toast('تایید با کسری بار ثبت و به راننده اطلاع داده شد', true);
     closeDetail(); loadList();
+  } catch (e) { toast(e.message, false); }
+}
+
+async function doFinalizePartial() {
+  if (!confirm('تایید نهایی این بارنامه ثبت شود؟ بعد از این، پیام واریز وجه برای راننده ارسال می‌شود.')) return;
+  try {
+    await apiFetch(`/api/barnames/${encodeURIComponent(currentBarname)}/finalize-partial`, { method: 'POST' });
+    toast('تایید نهایی ثبت شد و به راننده اطلاع داده شد', true);
+    closeDetail(); loadList();
+  } catch (e) { toast(e.message, false); }
+}
+
+async function doUploadAttachment() {
+  const input = document.getElementById('attachmentFile');
+  const f = input.files[0];
+  if (!f) { toast('یک تصویر انتخاب کنید', false); return; }
+  const fd = new FormData();
+  fd.append('file', f);
+  try {
+    await apiUpload(`/api/barnames/${encodeURIComponent(currentBarname)}/attachment`, fd);
+    toast('تصویر ذخیره شد', true);
+    input.value = '';
+    openDetail(currentBarname);
   } catch (e) { toast(e.message, false); }
 }
 
