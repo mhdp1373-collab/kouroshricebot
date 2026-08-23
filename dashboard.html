@@ -151,7 +151,7 @@
       <table>
         <thead>
           <tr>
-            <th>وضعیت</th><th>شماره بارنامه</th><th>راننده</th><th>مستندات</th><th>تاریخ ثبت</th>
+            <th>وضعیت</th><th>شماره بارنامه</th><th>راننده</th><th>نوع محصول</th><th>یادداشت کسری</th><th>مستندات</th><th>تاریخ ثبت</th>
           </tr>
         </thead>
         <tbody id="listBody"></tbody>
@@ -313,6 +313,8 @@ function renderList(rows) {
       <td data-label="وضعیت"><span class="badge ${BADGE_CLASS[r.status] || 'badge-none'}">${escapeHtml(r.status_label)}</span></td>
       <td data-label="بارنامه"><b>${escapeHtml(r.barname)}</b></td>
       <td data-label="راننده">${escapeHtml(r.driver_name || '-')}</td>
+      <td data-label="نوع محصول">${r.product_type ? escapeHtml(r.product_type) : '<span style="color:var(--muted);">—</span>'}</td>
+      <td data-label="یادداشت کسری">${r.deduction_note ? '⚠️ با کسری تایید شده — ' + escapeHtml(r.deduction_note) : '<span style="color:var(--muted);">—</span>'}</td>
       <td data-label="مستندات">${r.doc_count}</td>
       <td data-label="تاریخ">${escapeHtml(r.created_at || '-')}</td>
     `;
@@ -426,6 +428,11 @@ function renderDetail(data) {
     <div class="info-line">👤 راننده: <b>${escapeHtml(data.driver_name || '-')}</b> (آیدی: ${escapeHtml(data.driver_id || '-')})</div>
     <div class="info-line">🕐 تاریخ ثبت: ${escapeHtml(data.created_at || '-')}</div>
     ${data.completed_at ? `<div class="info-line">📤 تاریخ ارسال نهایی: ${escapeHtml(data.completed_at)}</div>` : ''}
+    <div class="msgbox" style="border-top:none; padding-top:0; margin-top:12px;">
+      <div class="info-line" style="margin-bottom:6px;">🌾 نوع محصول</div>
+      <input type="text" id="productTypeInput" placeholder="مثلاً: برنج ایرانی، برنج خارجی، شکر، آرد و ..." value="${escapeHtml(data.product_type || '')}" style="width:100%; margin-bottom:8px;">
+      <button class="btn-primary" onclick="saveProductType()">ذخیره نوع محصول</button>
+    </div>
     <div class="doc-grid">${docsHtml || '<p class="info-line">مستندی یافت نشد</p>'}</div>
     ${actionsHtml}
     <div class="section-title">📎 عکس/فایل‌های افزوده‌شده توسط ادمین</div>
@@ -449,6 +456,17 @@ function renderDetail(data) {
 function toggleForm(id) {
   document.querySelectorAll('.subform').forEach(el => el.classList.remove('open'));
   document.getElementById(id).classList.add('open');
+}
+
+async function saveProductType() {
+  const val = document.getElementById('productTypeInput').value.trim();
+  try {
+    await apiFetch(`/api/barnames/${encodeURIComponent(currentBarname)}/product-type`, {
+      method: 'POST', body: JSON.stringify({ type: val })
+    });
+    toast('نوع محصول ذخیره شد', true);
+    loadList();
+  } catch (e) { toast(e.message, false); }
 }
 
 async function doApprove() {
