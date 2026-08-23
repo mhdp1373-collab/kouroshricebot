@@ -1,2620 +1,473 @@
-"""
-ربات پیام‌رسان بله (Bale) مدیریت مستندات بارنامه - پی‌بار
-نسخه ۴ — با منوی Reply ثابت پایین صفحه
-
-توجه‌های مهم برای اجرا روی بله:
-──────────────────────────────
-1. توکن ربات را از @Bot_Father داخل خودِ پیام‌رسان بله بگیرید (نه تلگرام)
-   و در متغیر محیطی BOT_TOKEN قرار دهید.
-2. کتابخانه‌ی python-telegram-bot به‌صورت پیش‌فرض به سرور تلگرام وصل می‌شود؛
-   در تابع main() آدرس پایه به سرور بله (tapi.bale.ai) تغییر داده شده است
-   — این روش دقیقاً همان چیزی است که خودِ تیم بله در نمونه‌کدهای رسمی‌شان
-   (bale-bot-samples) برای استفاده از python-telegram-bot پیشنهاد داده‌اند.
-3. API بله زیرمجموعه‌ای از API تلگرام و «تا حد زیادی» سازگار با آن است، اما
-   ۱۰۰٪ یکسان نیست. مواردی که ممکن است نیاز به تست/تنظیم داشته باشند:
-   - برخی حالت‌های parse_mode (Markdown/HTML) ممکن است در بله رفتار
-     کمی متفاوتی داشته باشند.
-   - لینک‌های ویژه‌ی تلگرام مثل tg://user?id=... در بله کار نمی‌کنند؛
-     به همین دلیل در این نسخه به‌جای لینک کلیک‌پذیر، آیدی راننده به‌صورت
-     متن قابل‌کپی (`کد`) نمایش داده می‌شود.
-   - محدودیت حجم فایل/عکس و نرخ ارسال پیام ممکن است با تلگرام فرق داشته باشد.
-4. پیشنهاد می‌شود قبل از استفاده‌ی نهایی، کل سناریوها (آپلود، تایید،
-   عدم تایید، کسری بار، پاسخ راننده) را یک‌بار کامل روی بله تست کنید.
-"""
-
-import os
-import io
-import json
-import uuid
-import hashlib
-import asyncio
-import logging
-from types import SimpleNamespace
-from datetime import datetime, timedelta
-from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton
-)
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ConversationHandler, filters, ContextTypes, TypeHandler, ApplicationHandlerStop
-)
-from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Header, Query, Body, File, UploadFile, Form
-from fastapi.responses import HTMLResponse, StreamingResponse
-import uvicorn
-
-load_dotenv()
-
-# ─── مسیر ذخیره‌سازی دائمی ───
-# روی Railway (و بیشتر PaaSها)، فضای پیش‌فرض کانتینر ephemeral است: با هر دیپلوی/ری‌استارت
-# پاک می‌شود. برای جلوگیری از پاک شدن database.json و bot.log، یک Volume دائمی بساز و
-# مسیر Mount آن را در متغیر محیطی DATA_DIR بگذار (مثلاً DATA_DIR=/data).
-# اگر DATA_DIR تنظیم نشده باشد (مثلاً حین تست روی سیستم خودت)، فایل‌ها کنار خود کد
-# ذخیره می‌شوند — دقیقاً مثل رفتار قبلی.
-DATA_DIR = os.getenv("DATA_DIR", "").strip()
-if DATA_DIR:
-    os.makedirs(DATA_DIR, exist_ok=True)
-
-def _data_path(filename: str) -> str:
-    return os.path.join(DATA_DIR, filename) if DATA_DIR else filename
-
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-    handlers=[
-        logging.FileHandler(_data_path("bot.log"), encoding="utf-8"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
-
-if DATA_DIR:
-    logger.info(f"💾 مسیر ذخیره‌سازی دائمی (DATA_DIR) فعال است: {DATA_DIR}")
-else:
-    logger.warning(
-        "⚠️ متغیر DATA_DIR تنظیم نشده — دیتابیس کنار خود کد ذخیره می‌شود و با هر دیپلوی "
-        "روی Railway پاک خواهد شد. یک Volume دائمی بساز و DATA_DIR را به مسیر Mount آن تنظیم کن."
-    )
-
-# ─── محافظ ضد ارسال تکراری ───
-# اگر پلتفرم بله (یا مکانیزم polling) یک آپدیت را بیش از یک‌بار تحویل بدهد،
-# این محافظ با شناسه‌ی یکتای هر آپدیت (update_id) جلوی پردازش دوباره‌اش را می‌گیرد.
-_seen_update_ids: set = set()
-_seen_update_ids_order: list = []
-_MAX_SEEN_UPDATE_IDS = 5000
-
-async def dedupe_update_guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.update_id
-    if uid in _seen_update_ids:
-        logger.warning(f"⚠️ آپدیت تکراری نادیده گرفته شد — update_id={uid} (این آپدیت قبلاً پردازش شده بود)")
-        raise ApplicationHandlerStop
-    _seen_update_ids.add(uid)
-    _seen_update_ids_order.append(uid)
-    if len(_seen_update_ids_order) > _MAX_SEEN_UPDATE_IDS:
-        oldest = _seen_update_ids_order.pop(0)
-        _seen_update_ids.discard(oldest)
-
-# ─── تنظیمات ───
-# توکن را از @Bot_Father داخل پیام‌رسان بله بگیرید
-BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BALE_BOT_TOKEN_HERE")
-ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(","))) if os.getenv("ADMIN_IDS") else []
-STORAGE_CHANNEL_ID = os.getenv("STORAGE_CHANNEL_ID", "")
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@koroshrice")
-DB_FILE = _data_path("database.json")
-
-# ─── تنظیمات داشبورد وب ادمین ───
-DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN", "")
-PORT = int(os.getenv("PORT", "8080"))
-BOT_INSTANCE = None  # بعد از ساخته‌شدن Application مقداردهی می‌شود
-
-# آدرس پایه‌ی API بله (به‌جای api.telegram.org)
-BALE_API_BASE_URL = "https://tapi.bale.ai/"
-BALE_API_FILE_URL = "https://tapi.bale.ai/file/"
-
-# ─── مراحل مکالمه ───
-WAIT_BARNAME, WAIT_PHOTO, WAIT_CONFIRM = range(3)
-
-# ─── ترتیب و توضیح مستندات ───
-DOC_STEPS = [
-    (
-        "bill",
-        "📄 اصل بارنامه",
-        "📄 *مرحله ۱ از ۴ — اصل بارنامه*\n\n"
-        "لطفاً عکس واضح از *اصل بارنامه* بگیرید و ارسال کنید.\n\n"
-        "⚠️ نکات:\n"
-        "• کل برگه در کادر باشد\n"
-        "• نوشته‌ها خوانا باشند\n"
-        "• عکس تار نباشد"
-    ),
-    (
-        "origin",
-        "🔵 حواله بار مبدأ",
-        "🔵 *مرحله ۲ از ۴ — حواله بار مبدأ*\n\n"
-        "لطفاً عکس *حواله بار مبدأ* (محل بارگیری) را ارسال کنید.\n\n"
-        "⚠️ نکات:\n"
-        "• مهر و امضا باید واضح باشد\n"
-        "• تاریخ حواله مشخص باشد"
-    ),
-    (
-        "dest",
-        "🔴 رسید بار مقصد",
-        "🔴 *مرحله ۳ از ۴ — رسید بار مقصد*\n\n"
-        "لطفاً عکس *رسید بار مقصد* (محل تحویل) را ارسال کنید.\n\n"
-        "⚠️ نکات:\n"
-        "• مهر تحویل‌گیرنده باشد\n"
-        "• امضای تحویل‌گیرنده واضح باشد"
-    ),
-    (
-        "account",
-        "💳 شماره حساب/شبا",
-        "💳 *مرحله ۴ از ۴ — شماره حساب بانکی*\n\n"
-        "لطفاً *شماره حساب بانک تجارت* یا *شماره شبا* سایر بانک‌ها را به نام "
-        "*راننده اول یا دوم* که در بارنامه ذکر شده، ارسال کنید.\n\n"
-        "می‌توانید شماره را به‌صورت *متن* تایپ کنید یا عکس کارت/برگه حاوی شماره را ارسال نمایید.\n\n"
-        "⚠️ نکات:\n"
-        "• نام صاحب حساب باید با نام راننده در بارنامه مطابقت داشته باشد\n"
-        "• شماره شبا با IR شروع می‌شود"
-    ),
-]
-
-DOC_KEYS = [s[0] for s in DOC_STEPS]
-DOC_NAMES = {s[0]: s[1] for s in DOC_STEPS}
-DOC_GUIDES = {s[0]: s[2] for s in DOC_STEPS}
-
-# ─────────── پایگاه داده ───────────
-
-def load_db() -> dict:
-    if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-
-def save_db(db: dict):
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(db, f, ensure_ascii=False, indent=2)
-
-def get_barname_data(barname: str) -> dict:
-    db = load_db()
-    return db.get(barname, {
-        "barname": barname,
-        "created_at": "",
-        "driver_id": 0,
-        "driver_name": "",
-        "documents": {},
-        "message_ids": {}
-    })
-
-def save_barname_data(barname: str, data: dict):
-    db = load_db()
-    db[barname] = data
-    save_db(db)
-
-def add_barname_log(data: dict, event: str, actor: str = "", detail: str = ""):
-    """افزودن یک رویداد به تاریخچه‌ی بارنامه (برای نمایش در داشبورد).
-    این تابع فقط دیکشنری data را در حافظه تغییر می‌دهد؛ خودِ save_barname_data
-    باید بلافاصله بعدش صدا زده شود تا رویداد روی دیسک ذخیره شود."""
-    if "log" not in data or not isinstance(data.get("log"), list):
-        data["log"] = []
-    data["log"].append({
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "event": event,
-        "actor": actor,
-        "detail": detail,
-    })
-
-def make_review_id() -> str:
-    """شناسه یکتا برای هر درخواست بررسی (هر بار ارسال نهایی، شناسه جدید می‌گیرد)"""
-    return uuid.uuid4().hex[:10]
-
-def find_barname_by_review_id(rid: str):
-    """پیدا کردن بارنامه بر اساس شناسه بررسی فعال آن"""
-    db = load_db()
-    for bn, data in db.items():
-        if data.get("review", {}).get("id") == rid:
-            return bn, data
-    return None, None
-
-def make_barname_token(barname: str) -> str:
-    """شناسه کوتاه و پایدار برای هر شماره بارنامه (برای استفاده در callback_data)"""
-    return hashlib.md5(barname.encode("utf-8")).hexdigest()[:12]
-
-def find_barname_by_token(token: str):
-    db = load_db()
-    for bn in db.keys():
-        if make_barname_token(bn) == token:
-            return bn
-    return None
-
-def review_status_label(db_data: dict) -> str:
-    """برچسب وضعیت آخرین بررسی یک بارنامه"""
-    review = db_data.get("review", {})
-    status = review.get("status")
-    if status == "approved":
-        return "✅ تایید شده"
-    if status == "rejected":
-        return "❌ تایید نشده"
-    if status == "partial":
-        return "⚠️ تایید با کسری بار"
-    if status == "pending":
-        return "🕐 در انتظار بررسی"
-    return "⏳ ثبت نشده / ناقص"
-
-def get_driver_barnames(driver_id: int):
-    """همه‌ی بارنامه‌های ثبت‌شده توسط یک راننده، از دیتابیس (نه حافظه‌ی موقت)"""
-    db = load_db()
-    rows = []
-    for barname, data in db.items():
-        if data.get("driver_id") == driver_id:
-            rows.append((barname, data))
-    rows.sort(key=lambda x: x[1].get("created_at", ""), reverse=True)
-    return rows
-
-# ─────────── کیبوردها ───────────
-
-def main_menu_keyboard() -> InlineKeyboardMarkup:
-    """منوی اصلی راننده"""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚀 شروع آپلود مستندات", callback_data="start_upload")],
-        [InlineKeyboardButton("📋 راهنما", callback_data="show_help")],
-    ])
-
-def admin_keyboard() -> InlineKeyboardMarkup:
-    """منوی اصلی ادمین"""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔍 دریافت مستندات بارنامه", callback_data="admin_get")],
-        [InlineKeyboardButton("📊 لیست بارنامه‌ها", callback_data="admin_list")],
-        [InlineKeyboardButton("✅ بارنامه‌های تایید شده (۵ روز اخیر)", callback_data="admin_approved_list")],
-        [InlineKeyboardButton("🕐 نیازمند بررسی / تایید نشده", callback_data="admin_pending_list")],
-        [InlineKeyboardButton("📎 افزودن عکس/فایل به بارنامه", callback_data="admin_attach")],
-        [InlineKeyboardButton("🗑 حذف بارنامه", callback_data="admin_delete")],
-        [InlineKeyboardButton("📈 آمار کلی", callback_data="admin_stats")],
-    ])
-
-def driver_reply_keyboard() -> ReplyKeyboardMarkup:
-    """منوی ثابت پایین صفحه برای راننده"""
-    return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton("🚀 آپلود مستندات"), KeyboardButton("📋 راهنما")],
-            [KeyboardButton("📦 وضعیت بارنامه"), KeyboardButton("❌ لغو عملیات")],
-        ],
-        resize_keyboard=True,
-        input_field_placeholder="از منوی پایین انتخاب کنید..."
-    )
-
-def admin_reply_keyboard() -> ReplyKeyboardMarkup:
-    """منوی ثابت پایین صفحه برای ادمین"""
-    return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton("🔍 دریافت مستندات"), KeyboardButton("📊 لیست بارنامه‌ها")],
-            [KeyboardButton("✅ بارنامه‌های تایید شده"), KeyboardButton("🕐 نیازمند بررسی")],
-            [KeyboardButton("📎 افزودن عکس/فایل"), KeyboardButton("🗑 حذف بارنامه")],
-            [KeyboardButton("📈 آمار کلی"), KeyboardButton("🏠 منوی اصلی ادمین")],
-        ],
-        resize_keyboard=True,
-        input_field_placeholder="پنل مدیریت پی‌بار"
-    )
-
-
-def confirm_keyboard(has_prev: bool = False) -> InlineKeyboardMarkup:
-    """کیبورد تأیید عکس — با دکمه بازگشت به مرحله قبل"""
-    rows = [
-        [InlineKeyboardButton("✅ تأیید — برو مرحله بعد", callback_data="confirm_photo")],
-        [InlineKeyboardButton("🔄 عکس رو عوض کن", callback_data="retake_photo")],
-    ]
-    if has_prev:
-        rows.append([InlineKeyboardButton("⬅️ برگشت به مرحله قبل", callback_data="go_prev_step")])
-    rows.append([InlineKeyboardButton("🏁 اتمام و ثبت همین‌ها", callback_data="finish_early")])
-    rows.append([InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_to_main")])
-    return InlineKeyboardMarkup(rows)
-
-def step_waiting_keyboard(has_prev: bool = False) -> InlineKeyboardMarkup:
-    """دکمه‌های زیر راهنمای هر مرحله"""
-    rows = [
-        [InlineKeyboardButton("⏭ این مرحله رو رد کن", callback_data="skip_step")],
-    ]
-    if has_prev:
-        rows.append([InlineKeyboardButton("⬅️ برگشت به مرحله قبل", callback_data="go_prev_step")])
-    rows.append([InlineKeyboardButton("🏁 اتمام و ثبت همین‌ها", callback_data="finish_early")])
-    rows.append([InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_to_main")])
-    return InlineKeyboardMarkup(rows)
-
-def skip_keyboard(has_prev: bool = False) -> InlineKeyboardMarkup:
-    """کیبورد مرحله اختیاری (سایر مستندات)"""
-    rows = [
-        [InlineKeyboardButton("⏭ ندارم، برو بعدی", callback_data="skip_step")],
-    ]
-    if has_prev:
-        rows.append([InlineKeyboardButton("⬅️ برگشت به مرحله قبل", callback_data="go_prev_step")])
-    rows.append([InlineKeyboardButton("🏁 اتمام و ثبت همین‌ها", callback_data="finish_early")])
-    rows.append([InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_to_main")])
-    return InlineKeyboardMarkup(rows)
-
-def final_confirm_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ بله، تأیید نهایی", callback_data="final_confirm")],
-        [InlineKeyboardButton("✏️ ویرایش مستندات", callback_data="edit_docs")],
-        [InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_to_main")],
-    ])
-
-def review_keyboard(rid: str, barname: str = "") -> InlineKeyboardMarkup:
-    """کیبورد بررسی مستندات برای ادمین"""
-    rows = [
-        [InlineKeyboardButton("✅ تأیید", callback_data=f"radm_appr_{rid}")],
-        [InlineKeyboardButton("❌ عدم تأیید", callback_data=f"radm_rej_{rid}")],
-        [InlineKeyboardButton("⚠️ تأیید با کسری بار", callback_data=f"radm_part_{rid}")],
-    ]
-    if barname:
-        token = make_barname_token(barname)
-        rows.append([InlineKeyboardButton(f"📦 نمایش مجدد مستندات {barname}", callback_data=f"admin_open_{token}")])
-    return InlineKeyboardMarkup(rows)
-
-def driver_partial_response_keyboard(rid: str) -> InlineKeyboardMarkup:
-    """کیبورد پاسخ راننده به تایید با کسری بار"""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ مورد تایید است", callback_data=f"drv_ok_{rid}")],
-        [InlineKeyboardButton("❌ مورد تایید نیست", callback_data=f"drv_no_{rid}")],
-    ])
-
-def barname_entry_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_to_main")],
-    ])
-
-def admin_back_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 بازگشت به پنل ادمین", callback_data="admin_back")],
-    ])
-
-def edit_docs_keyboard(docs: dict) -> InlineKeyboardMarkup:
-    """کیبورد ویرایش مستندات آپلودشده"""
-    rows = []
-    for key in DOC_KEYS:
-        if key in docs:
-            name = DOC_NAMES.get(key, key)
-            rows.append([InlineKeyboardButton(f"🔄 {name}", callback_data=f"edit_doc_{key}")])
-    rows.append([InlineKeyboardButton("🔙 بازگشت به خلاصه", callback_data="back_to_summary")])
-    rows.append([InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_to_main")])
-    return InlineKeyboardMarkup(rows)
-
-# ─────────── کمکی ───────────
-
-def current_step_index(context) -> int:
-    return context.user_data.get("step", 0)
-
-def current_step_key(context) -> str:
-    idx = current_step_index(context)
-    if idx < len(DOC_STEPS):
-        return DOC_STEPS[idx][0]
-    return None
-
-def progress_bar(current: int, total: int) -> str:
-    filled = '▓' * current
-    empty = '░' * (total - current)
-    return f"{filled}{empty} ({current}/{total})"
-
-async def send_step_guide(target, context, is_callback=False):
-    """ارسال راهنمای مرحله فعلی با دکمه بازگشت"""
-    idx = current_step_index(context)
-    if idx >= len(DOC_STEPS):
-        return
-    key, name, guide = DOC_STEPS[idx]
-    barname = context.user_data.get("barname", "")
-    has_prev = idx > 0
-
-    if key == "other":
-        markup = skip_keyboard(has_prev=has_prev)
-    else:
-        markup = step_waiting_keyboard(has_prev=has_prev)
-
-    text = (
-        f"📦 بارنامه: *{barname}*\n"
-        f"📊 {progress_bar(idx, len(DOC_STEPS))}\n\n"
-        f"{guide}"
-    )
-
-    if is_callback:
-        await target.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
-    else:
-        await target.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
-
-async def go_to_main_menu(query, context, is_admin=False):
-    """بازگشت به منوی اصلی"""
-    context.user_data.clear()
-    user_name = query.from_user.first_name
-
-    if is_admin:
-        await query.edit_message_text(
-            f"🔐 *پنل مدیریت پی‌بار*\n\nسلام {user_name} عزیز! از منوی زیر انتخاب کنید:",
-            parse_mode="Markdown",
-            reply_markup=admin_keyboard()
-        )
-    else:
-        await query.edit_message_text(
-            f"🏠 *منوی اصلی پی‌بار*\n\nسلام {user_name} عزیز!\nبرای شروع آپلود مستندات دکمه زیر را بزنید:",
-            parse_mode="Markdown",
-            reply_markup=main_menu_keyboard()
-        )
-
-# ─────────── هندلرهای اصلی ───────────
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.effective_user
-    context.user_data.clear()
-
-    if user.id in ADMIN_IDS:
-        await update.message.reply_text(
-            f"👋 سلام {user.first_name} عزیز!\n\n"
-            "🔐 *پنل مدیریت پی‌بار*\n"
-            "از منوی پایین صفحه انتخاب کنید:",
-            parse_mode="Markdown",
-            reply_markup=admin_reply_keyboard()
-        )
-        await update.message.reply_text(
-            "یا از دکمه‌های زیر استفاده کنید:",
-            reply_markup=admin_keyboard()
-        )
-        return ConversationHandler.END
-
-    await update.message.reply_text(
-        f"👋 سلام {user.first_name} عزیز!\n\n"
-        "🚛 به ربات مستندات *پی‌بار* خوش آمدید.\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "📋 *نحوه کار:*\n"
-        "۱. دکمه شروع را بزنید\n"
-        "۲. شماره بارنامه را وارد کنید\n"
-        "۳. ربات یک‌به‌یک هر مستند را درخواست می‌کند\n"
-        "۴. عکس بگیرید و ارسال کنید\n"
-        "━━━━━━━━━━━━━━━━━━━━",
-        parse_mode="Markdown",
-        reply_markup=driver_reply_keyboard()
-    )
-    await update.message.reply_text(
-        "یا از دکمه‌های زیر شروع کنید:",
-        reply_markup=main_menu_keyboard()
-    )
-    return ConversationHandler.END
-
-
-async def handle_start_upload_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """دکمه‌ی «🚀 آپلود مستندات» از منوی پایین صفحه — باید entry_point مکالمه باشد تا وضعیت درست ثبت شود"""
-    await update.message.reply_text(
-        "📝 لطفاً *شماره بارنامه* را وارد کنید:",
-        parse_mode="Markdown",
-        reply_markup=barname_entry_keyboard()
-    )
-    return WAIT_BARNAME
-
-
-async def handle_start_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """شروع فرایند آپلود از منوی اصلی"""
-    query = update.callback_query
-    await query.answer()
-
-    await query.edit_message_text(
-        "📝 لطفاً *شماره بارنامه* را وارد کنید:\n\n"
-        "_(حداقل ۳ کاراکتر)_",
-        parse_mode="Markdown",
-        reply_markup=barname_entry_keyboard()
-    )
-    return WAIT_BARNAME
-
-
-async def resubmit_barname(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """بارگذاری مجدد مستندات یک بارنامه رد شده، از طریق دکمه پیام عدم تایید"""
-    query = update.callback_query
-    await query.answer()
-
-    token = query.data.replace("resubmit_", "")
-    barname = find_barname_by_token(token)
-    if not barname:
-        await query.message.reply_text("⚠️ بارنامه یافت نشد.")
-        return ConversationHandler.END
-
-    context.user_data.clear()
-    context.user_data["barname"] = barname
-    context.user_data["step"] = 0
-    context.user_data["session_documents"] = {}
-
-    await query.message.reply_text(
-        f"🔄 بارگذاری مجدد مستندات بارنامه *{barname}*\n\n"
-        "مستندات را دوباره یک‌به‌یک ارسال کنید 👇",
-        parse_mode="Markdown"
-    )
-    await send_step_guide(query, context, is_callback=False)
-    return WAIT_PHOTO
-
-
-async def handle_show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """نمایش راهنما"""
-    query = update.callback_query
-    await query.answer()
-
-    await query.edit_message_text(
-        "📋 *راهنمای استفاده از ربات پی‌بار*\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "🔹 *مستندات مورد نیاز:*\n"
-        "۱. 📄 اصل بارنامه\n"
-        "۲. 🔵 حواله بار مبدأ\n"
-        "۳. 🔴 رسید بار مقصد\n"
-        "۴. 💳 شماره حساب بانک تجارت یا شماره شبا (به نام راننده اول یا دوم بارنامه)\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "💡 *نکات مهم:*\n"
-        "• عکس‌ها باید واضح و خوانا باشند\n"
-        "• در هر مرحله می‌توانید برگردید\n"
-        "• در صورت خطا دکمه بازگشت را بزنید\n"
-        "• /cancel برای لغو کامل عملیات",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🚀 شروع آپلود", callback_data="start_upload")],
-            [InlineKeyboardButton("🏠 منوی اصلی", callback_data="back_to_main")],
-        ])
-    )
-
-
-async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """بازگشت به منوی اصلی — برای راننده و ادمین"""
-    query = update.callback_query
-    await query.answer()
-    user = query.from_user
-    is_admin = user.id in ADMIN_IDS
-    await go_to_main_menu(query, context, is_admin=is_admin)
-    return ConversationHandler.END
-
-
-async def receive_barname(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    barname = update.message.text.strip()
-
-    if not barname or len(barname) < 3:
-        await update.message.reply_text(
-            "⚠️ شماره بارنامه معتبر نیست.\nلطفاً دوباره وارد کنید:",
-            reply_markup=barname_entry_keyboard()
-        )
-        return WAIT_BARNAME
-
-    context.user_data["barname"] = barname
-    context.user_data["step"] = 0
-    context.user_data["session_documents"] = {}
-
-    await update.message.reply_text(
-        f"✅ بارنامه *{barname}* ثبت شد.\n\n"
-        "الان شروع می‌کنیم — مستندات را یک‌به‌یک آپلود کنید 👇",
-        parse_mode="Markdown"
-    )
-
-    await send_step_guide(update, context, is_callback=False)
-    return WAIT_PHOTO
-
-
-async def receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """دریافت عکس یا متن (برای مرحله شماره حساب/شبا) از راننده"""
-    idx = current_step_index(context)
-    key, name, _ = DOC_STEPS[idx]
-    has_prev = idx > 0
-
-    photo = update.message.photo[-1] if update.message.photo else None
-    doc = update.message.document
-    text = update.message.text
-
-    # مرحله شماره حساب/شبا می‌تواند به‌صورت متن هم ارسال شود
-    if key == "account" and text and not photo and not doc:
-        context.user_data["pending_file"] = {"file_id": None, "type": "text", "text": text.strip()}
-        await update.message.reply_text(
-            f"👆 اطلاعات *{name}* دریافت شد:\n\n`{text.strip()}`\n\n"
-            "آیا این اطلاعات صحیح است؟",
-            parse_mode="Markdown",
-            reply_markup=confirm_keyboard(has_prev=has_prev)
-        )
-        return WAIT_CONFIRM
-
-    if not photo and not doc:
-        warn = (
-            "⚠️ لطفاً شماره حساب/شبا را به‌صورت متن تایپ کنید یا عکس آن را ارسال نمایید."
-            if key == "account" else "⚠️ لطفاً عکس ارسال کنید."
-        )
-        await update.message.reply_text(
-            warn,
-            reply_markup=step_waiting_keyboard(has_prev=has_prev)
-        )
-        return WAIT_PHOTO
-
-    if photo:
-        file_id = photo.file_id
-        file_type = "photo"
-    else:
-        file_id = doc.file_id
-        file_type = "document"
-
-    context.user_data["pending_file"] = {"file_id": file_id, "type": file_type}
-
-    await update.message.reply_text(
-        f"👆 عکس *{name}* دریافت شد!\n\n"
-        "آیا این عکس واضح و کامل است؟",
-        parse_mode="Markdown",
-        reply_markup=confirm_keyboard(has_prev=has_prev)
-    )
-    return WAIT_CONFIRM
-
-
-async def send_single_doc(bot, chat_id, doc_key: str, doc_info: dict, barname: str, extra_caption: str = "", parse_mode: str = None):
-    """ارسال یک مستند (عکس/فایل/متن) به یک چت مشخص"""
-    label = DOC_NAMES.get(doc_key, doc_key)
-    caption = f"{label}\n📦 بارنامه: {barname}"
-    if extra_caption:
-        caption += f"\n{extra_caption}"
-
-    ftype = doc_info.get("file_type")
-    if ftype == "photo":
-        await bot.send_photo(chat_id=chat_id, photo=doc_info["file_id"], caption=caption, parse_mode=parse_mode)
-    elif ftype == "document":
-        await bot.send_document(chat_id=chat_id, document=doc_info["file_id"], caption=caption, parse_mode=parse_mode)
-    else:
-        await bot.send_message(chat_id=chat_id, text=f"{caption}\n\n📝 {doc_info.get('text', '-')}", parse_mode=parse_mode)
-
-
-async def confirm_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """تأیید عکس/متن و رفتن به مرحله بعد"""
-    query = update.callback_query
-    await query.answer()
-
-    pending = context.user_data.get("pending_file")
-    if not pending:
-        await query.edit_message_text(
-            "⚠️ خطا — اطلاعاتی برای ذخیره یافت نشد.\nلطفاً دوباره ارسال کنید.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 تلاش مجدد", callback_data="retake_photo")],
-                [InlineKeyboardButton("🏠 بازگشت به منو", callback_data="back_to_main")],
-            ])
-        )
-        return WAIT_PHOTO
-
-    barname = context.user_data["barname"]
-    idx = current_step_index(context)
-    key, name, _ = DOC_STEPS[idx]
-
-    session_docs = context.user_data.setdefault("session_documents", {})
-    session_docs[key] = {
-        "file_id": pending["file_id"],
-        "file_type": pending["type"],
-        "text": pending.get("text", ""),
-        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "driver_id": update.effective_user.id,
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>داشبورد پی‌بار</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1f232c; --border: #2a2f3a;
+    --text: #e8eaed; --muted: #9aa0ab; --primary: #4f8cff; --green: #34c76f;
+    --red: #ff5c5c; --orange: #ffb020; --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text); font-family: Tahoma, "Segoe UI", sans-serif;
+    margin: 0; padding: 0; min-height: 100vh;
+  }
+  header {
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 14px 20px; display: flex; align-items: center; justify-content: space-between;
+    position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { font-size: 18px; margin: 0; }
+  #loginBox, #app { padding: 20px; max-width: 1100px; margin: 0 auto; }
+  #loginBox { max-width: 380px; margin-top: 80px; text-align: center; }
+  input, textarea, select, button {
+    font-family: inherit; font-size: 14px; border-radius: var(--radius);
+    border: 1px solid var(--border); background: var(--panel2); color: var(--text);
+    padding: 10px 12px; outline: none;
+  }
+  input:focus, textarea:focus { border-color: var(--primary); }
+  button { cursor: pointer; border: none; font-weight: 600; transition: opacity .15s; }
+  button:hover { opacity: .85; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-primary { background: var(--primary); color: #fff; }
+  .btn-green { background: var(--green); color: #06210f; }
+  .btn-red { background: var(--red); color: #2b0505; }
+  .btn-orange { background: var(--orange); color: #2b1c00; }
+  .btn-ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  .stats { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+  .stat-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px 18px; flex: 1; min-width: 120px; text-align: center;
+  }
+  .stat-card .num { font-size: 22px; font-weight: 700; }
+  .stat-card .label { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .toolbar { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
+  .toolbar input[type=text] { flex: 1; min-width: 180px; }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+  .tab {
+    padding: 8px 14px; border-radius: 999px; border: 1px solid var(--border);
+    background: var(--panel2); color: var(--muted); cursor: pointer; font-size: 13px;
+  }
+  .tab.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: var(--radius); overflow: hidden; }
+  th, td { padding: 12px 14px; text-align: right; border-bottom: 1px solid var(--border); font-size: 13px; }
+  th { color: var(--muted); font-weight: 600; background: var(--panel2); }
+  tr.row { cursor: pointer; }
+  tr.row:hover { background: var(--panel2); }
+  .badge { padding: 3px 10px; border-radius: 999px; font-size: 12px; white-space: nowrap; }
+  .badge-pending { background: #3a3210; color: var(--orange); }
+  .badge-approved { background: #0f3a22; color: var(--green); }
+  .badge-rejected { background: #3a1212; color: var(--red); }
+  .badge-partial { background: #3a2a10; color: var(--orange); }
+  .badge-none { background: #262b34; color: var(--muted); }
+  #empty { text-align: center; color: var(--muted); padding: 40px 0; }
+
+  .overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none;
+    align-items: flex-start; justify-content: center; z-index: 50; overflow-y: auto; padding: 30px 14px;
+  }
+  .overlay.open { display: flex; }
+  .modal {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    max-width: 640px; width: 100%; padding: 20px;
+  }
+  .modal h2 { margin-top: 0; font-size: 17px; }
+  .modal .close { float: left; cursor: pointer; color: var(--muted); font-size: 20px; }
+  .doc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin: 14px 0; }
+  .doc-card { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--panel2); }
+  .doc-card img { width: 100%; height: 130px; object-fit: cover; display: block; }
+  .doc-card .doc-text { padding: 12px; font-size: 13px; min-height: 60px; display: flex; align-items: center; justify-content: center; text-align: center; }
+  .doc-card .doc-label { font-size: 12px; color: var(--muted); padding: 6px 8px; border-top: 1px solid var(--border); }
+  .info-line { font-size: 13px; color: var(--muted); margin: 4px 0; }
+  .info-line b { color: var(--text); }
+  .action-row { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+  .action-row > button { flex: 1; min-width: 110px; }
+  .subform { margin-top: 12px; display: none; }
+  .subform.open { display: block; }
+  .subform textarea { width: 100%; min-height: 70px; margin-bottom: 8px; resize: vertical; }
+  .msgbox { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 14px; }
+  .msgbox textarea { width: 100%; min-height: 60px; margin-bottom: 8px; resize: vertical; }
+  .section-title {
+    font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px;
+    margin: 22px 0 10px; display: flex; align-items: center; gap: 8px;
+  }
+  .section-title::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+  .timeline { position: relative; padding-right: 20px; }
+  .timeline::before {
+    content: ""; position: absolute; right: 5px; top: 4px; bottom: 4px; width: 2px; background: var(--border);
+  }
+  .tl-item { position: relative; padding-bottom: 14px; }
+  .tl-item:last-child { padding-bottom: 0; }
+  .tl-dot {
+    position: absolute; right: -20px; top: 3px; width: 12px; height: 12px; border-radius: 50%;
+    background: var(--panel); border: 3px solid var(--muted);
+  }
+  .tl-item.ev-approved .tl-dot { border-color: var(--green); }
+  .tl-item.ev-rejected .tl-dot { border-color: var(--red); }
+  .tl-item.ev-partial .tl-dot { border-color: var(--orange); }
+  .tl-item.ev-driver .tl-dot { border-color: var(--primary); }
+  .tl-card { background: var(--panel2); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; }
+  .tl-time { font-size: 11px; color: var(--muted); direction: ltr; text-align: right; }
+  .tl-event { font-size: 13.5px; font-weight: 700; margin: 2px 0 3px; }
+  .tl-actor { font-size: 12px; color: var(--muted); }
+  .tl-detail { font-size: 12.5px; color: var(--text); margin-top: 5px; line-height: 1.7; white-space: pre-wrap; }
+  .no-log { color: var(--muted); font-size: 13px; }
+
+  .toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: var(--panel2); border: 1px solid var(--border); padding: 10px 20px;
+    border-radius: var(--radius); font-size: 13px; z-index: 100; display: none;
+  }
+  .toast.show { display: block; }
+  .toast.err { border-color: var(--red); color: var(--red); }
+  .toast.ok { border-color: var(--green); color: var(--green); }
+  @media (max-width: 640px) {
+    table, thead, tbody, th, td, tr { display: block; }
+    thead { display: none; }
+    tr.row { border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 10px; padding: 8px; }
+    td { border: none; padding: 4px 6px; }
+    td::before { content: attr(data-label); color: var(--muted); display: inline-block; min-width: 90px; font-size: 11px; }
+  }
+</style>
+</head>
+<body>
+
+<div id="loginBox">
+  <h1>🔐 داشبورد پی‌بار</h1>
+  <p style="color:var(--muted); font-size:13px;">توکن دسترسی ادمین را وارد کنید</p>
+  <input type="password" id="tokenInput" placeholder="توکن" style="width:100%; margin-bottom:10px;">
+  <button class="btn-primary" style="width:100%;" onclick="doLogin()">ورود</button>
+  <div id="loginError" style="color:var(--red); font-size:12px; margin-top:8px;"></div>
+</div>
+
+<div id="app" style="display:none;">
+  <header>
+    <h1>📦 داشبورد بارنامه‌ها</h1>
+    <button class="btn-ghost" onclick="logout()">خروج</button>
+  </header>
+
+  <div style="padding:20px; max-width:1100px; margin:0 auto;">
+    <div class="stats" id="statsRow"></div>
+
+    <div class="toolbar">
+      <input type="text" id="searchInput" placeholder="جستجوی شماره بارنامه..." oninput="debouncedLoad()">
+      <button class="btn-ghost" onclick="loadList()">🔄 بروزرسانی</button>
+    </div>
+
+    <div class="tabs" id="tabsRow" style="margin-bottom:16px;"></div>
+
+    <div id="listWrap">
+      <table>
+        <thead>
+          <tr>
+            <th>وضعیت</th><th>شماره بارنامه</th><th>راننده</th><th>مستندات</th><th>تاریخ ثبت</th>
+          </tr>
+        </thead>
+        <tbody id="listBody"></tbody>
+      </table>
+      <div id="empty" style="display:none;">چیزی برای نمایش نیست</div>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="detailOverlay">
+  <div class="modal">
+    <span class="close" onclick="closeDetail()">✕</span>
+    <div id="detailContent">در حال بارگذاری...</div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let TOKEN = localStorage.getItem('pibar_token') || '';
+let currentStatus = 'all';
+let currentBarname = null;
+let debounceTimer = null;
+
+const STATUS_LABELS = {
+  all: 'همه', pending: '🕐 در انتظار', approved: '✅ تایید شده',
+  rejected: '❌ رد شده', partial: '⚠️ کسری بار', none: 'ثبت‌نشده'
+};
+const BADGE_CLASS = {
+  pending: 'badge-pending', approved: 'badge-approved',
+  rejected: 'badge-rejected', partial: 'badge-partial', none: 'badge-none'
+};
+
+function toast(msg, ok) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show ' + (ok ? 'ok' : 'err');
+  setTimeout(() => t.className = 'toast', 2500);
+}
+
+function debouncedLoad() {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(loadList, 350);
+}
+
+async function apiFetch(path, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({'X-Dashboard-Token': TOKEN, 'Content-Type': 'application/json'}, opts.headers || {});
+  const res = await fetch(path, opts);
+  if (res.status === 401) { logout(); throw new Error('توکن نامعتبر'); }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || 'خطا در ارتباط با سرور');
+  return data;
+}
+
+function doLogin() {
+  const val = document.getElementById('tokenInput').value.trim();
+  if (!val) return;
+  TOKEN = val;
+  localStorage.setItem('pibar_token', TOKEN);
+  checkAndEnter();
+}
+
+function logout() {
+  localStorage.removeItem('pibar_token');
+  TOKEN = '';
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('loginBox').style.display = 'block';
+}
+
+async function checkAndEnter() {
+  try {
+    await apiFetch('/api/barnames?status=all');
+    document.getElementById('loginBox').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    renderTabs();
+    loadList();
+  } catch (e) {
+    document.getElementById('loginError').textContent = 'توکن اشتباه است یا سرور در دسترس نیست';
+  }
+}
+
+function renderTabs() {
+  const wrap = document.getElementById('tabsRow');
+  wrap.innerHTML = '';
+  Object.keys(STATUS_LABELS).forEach(key => {
+    const el = document.createElement('div');
+    el.className = 'tab' + (key === currentStatus ? ' active' : '');
+    el.textContent = STATUS_LABELS[key];
+    el.onclick = () => { currentStatus = key; renderTabs(); loadList(); };
+    wrap.appendChild(el);
+  });
+}
+
+async function loadList() {
+  const search = document.getElementById('searchInput').value.trim();
+  const params = new URLSearchParams({ status: currentStatus, search });
+  try {
+    const rows = await apiFetch('/api/barnames?' + params.toString());
+    renderStats(rows);
+    renderList(rows);
+  } catch (e) {
+    toast(e.message, false);
+  }
+}
+
+function renderStats(allRowsForCurrentFilter) {
+  // برای آمار کلی، از یک درخواست جدا با status=all استفاده می‌کنیم تا فیلتر فعلی روی آمار اثر نگذارد
+  apiFetch('/api/barnames?status=all').then(rows => {
+    const counts = { pending: 0, approved: 0, rejected: 0, partial: 0, none: 0 };
+    rows.forEach(r => { counts[r.status] = (counts[r.status] || 0) + 1; });
+    const wrap = document.getElementById('statsRow');
+    wrap.innerHTML = '';
+    const items = [
+      ['کل بارنامه‌ها', rows.length],
+      ['در انتظار بررسی', counts.pending],
+      ['تایید شده', counts.approved],
+      ['رد شده', counts.rejected],
+      ['کسری بار', counts.partial],
+    ];
+    items.forEach(([label, num]) => {
+      const card = document.createElement('div');
+      card.className = 'stat-card';
+      card.innerHTML = `<div class="num">${num}</div><div class="label">${label}</div>`;
+      wrap.appendChild(card);
+    });
+  }).catch(() => {});
+}
+
+function renderList(rows) {
+  const body = document.getElementById('listBody');
+  body.innerHTML = '';
+  document.getElementById('empty').style.display = rows.length ? 'none' : 'block';
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    tr.className = 'row';
+    tr.onclick = () => openDetail(r.barname);
+    tr.innerHTML = `
+      <td data-label="وضعیت"><span class="badge ${BADGE_CLASS[r.status] || 'badge-none'}">${r.status_label}</span></td>
+      <td data-label="بارنامه"><b>${r.barname}</b></td>
+      <td data-label="راننده">${r.driver_name || '-'}</td>
+      <td data-label="مستندات">${r.doc_count}</td>
+      <td data-label="تاریخ">${r.created_at || '-'}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+async function openDetail(barname) {
+  currentBarname = barname;
+  const overlay = document.getElementById('detailOverlay');
+  overlay.classList.add('open');
+  document.getElementById('detailContent').innerHTML = 'در حال بارگذاری...';
+  try {
+    const data = await apiFetch('/api/barnames/' + encodeURIComponent(barname));
+    renderDetail(data);
+  } catch (e) {
+    document.getElementById('detailContent').innerHTML = 'خطا: ' + e.message;
+  }
+}
+
+function closeDetail() {
+  document.getElementById('detailOverlay').classList.remove('open');
+  currentBarname = null;
+}
+
+function renderDetail(data) {
+  const review = data.review || {};
+  const status = review.status || 'none';
+  const docsHtml = (data.documents || []).map(d => {
+    let inner;
+    if (d.file_type === 'text') {
+      inner = `<div class="doc-text">${escapeHtml(d.text || '-')}</div>`;
+    } else {
+      const url = `/api/barnames/${encodeURIComponent(data.barname)}/doc/${encodeURIComponent(d.key)}/file?token=${encodeURIComponent(TOKEN)}`;
+      inner = `<img src="${url}" loading="lazy" onclick="window.open('${url}','_blank')">`;
     }
-
-    context.user_data["pending_file"] = None
-
-    next_idx = idx + 1
-    context.user_data["step"] = next_idx
-
-    if next_idx >= len(DOC_STEPS):
-        return await show_final_summary(query, context)
-
-    next_key, next_name, next_guide = DOC_STEPS[next_idx]
-
-    await query.edit_message_text(
-        f"✅ *{name}* با موفقیت ذخیره شد!\n\n"
-        f"📊 پیشرفت: {progress_bar(next_idx, len(DOC_STEPS))}\n\n"
-        f"حالا نوبت *{next_name}* است 👇",
-        parse_mode="Markdown"
-    )
-
-    has_prev = next_idx > 0
-    markup = step_waiting_keyboard(has_prev=has_prev)
-
-    barname = context.user_data.get("barname", "")
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=f"📦 بارنامه: *{barname}*\n\n{next_guide}",
-        parse_mode="Markdown",
-        reply_markup=markup
-    )
-
-    return WAIT_PHOTO
-
-
-async def retake_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """عکس رو عوض کن"""
-    query = update.callback_query
-    await query.answer()
-
-    idx = current_step_index(context)
-    key, name, _ = DOC_STEPS[idx]
-    context.user_data["pending_file"] = None
-    has_prev = idx > 0
-
-    await query.edit_message_text(
-        f"🔄 باشه! دوباره عکس *{name}* را ارسال کنید:\n\n"
-        "_(عکس جدید را در چت ارسال کنید)_",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ برگشت به مرحله قبل", callback_data="go_prev_step")] if has_prev else [],
-            [InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_to_main")],
-        ])
-    )
-    return WAIT_PHOTO
-
-
-async def go_prev_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """بازگشت به مرحله قبل"""
-    query = update.callback_query
-    await query.answer()
-
-    idx = current_step_index(context)
-
-    if idx <= 0:
-        # اگر در اولین مرحله‌ایم، برگشت به ورود بارنامه
-        await query.edit_message_text(
-            "📝 لطفاً *شماره بارنامه* را دوباره وارد کنید\n"
-            "یا اگر می‌خواهید بارنامه فعلی را ادامه دهید شماره همان را وارد کنید:",
-            parse_mode="Markdown",
-            reply_markup=barname_entry_keyboard()
-        )
-        context.user_data["step"] = 0
-        return WAIT_BARNAME
-
-    prev_idx = idx - 1
-    context.user_data["step"] = prev_idx
-    context.user_data["pending_file"] = None
-
-    # حذف مستند قبلی اگه ذخیره شده (فقط از حافظه‌ی موقت جلسه، نه دیتابیس)
-    session_docs = context.user_data.get("session_documents", {})
-    prev_key = DOC_STEPS[prev_idx][0]
-    if prev_key in session_docs:
-        del session_docs[prev_key]
-
-    await send_step_guide(query, context, is_callback=True)
-    return WAIT_PHOTO
-
-
-async def skip_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """رد کردن مرحله"""
-    query = update.callback_query
-    await query.answer()
-
-    idx = current_step_index(context)
-    key, name, _ = DOC_STEPS[idx]
-    next_idx = idx + 1
-    context.user_data["step"] = next_idx
-
-    if next_idx >= len(DOC_STEPS):
-        return await show_final_summary(query, context)
-
-    await query.edit_message_text(
-        f"⏭ *{name}* رد شد.\n\n"
-        f"📊 پیشرفت: {progress_bar(next_idx, len(DOC_STEPS))}",
-        parse_mode="Markdown"
-    )
-
-    context.user_data["step"] = next_idx
-    next_key, next_name, next_guide = DOC_STEPS[next_idx]
-    barname = context.user_data.get("barname", "")
-    has_prev = next_idx > 0
-
-    if next_key == "other":
-        markup = skip_keyboard(has_prev=has_prev)
-    else:
-        markup = step_waiting_keyboard(has_prev=has_prev)
-
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=f"📦 بارنامه: *{barname}*\n\n{next_guide}",
-        parse_mode="Markdown",
-        reply_markup=markup
-    )
-    return WAIT_PHOTO
-
-
-async def finish_early(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """اتمام زودهنگام"""
-    query = update.callback_query
-    await query.answer()
-
-    barname = context.user_data.get("barname", "")
-    docs = context.user_data.get("session_documents", {})
-
-    if not docs:
-        await query.edit_message_text(
-            "⚠️ *هنوز هیچ مستندی آپلود نشده!*\n\n"
-            "لطفاً حداقل یک مستند ارسال کنید تا بتوانید ثبت کنید.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 برگشت به مرحله جاری", callback_data="go_back_to_step")],
-                [InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_to_main")],
-            ])
-        )
-        return WAIT_PHOTO
-
-    return await show_final_summary(query, context)
-
-
-async def go_back_to_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """بازگشت به مرحله جاری بدون تغییر"""
-    query = update.callback_query
-    await query.answer()
-    await send_step_guide(query, context, is_callback=True)
-    return WAIT_PHOTO
-
-
-async def show_final_summary(query, context) -> int:
-    """نمایش خلاصه نهایی"""
-    barname = context.user_data.get("barname", "")
-    docs = context.user_data.get("session_documents", {})
-
-    done_list = "\n".join([f"  ✅ {DOC_NAMES.get(k, k)}" for k in docs.keys()]) or "  (هیچ‌کدام)"
-    missing = [k for k in DOC_KEYS if k not in docs]
-    missing_list = "\n".join([f"  ⬜ {DOC_NAMES.get(k, k)}" for k in missing]) if missing else ""
-
-    summary = (
-        f"🎯 *خلاصه بارنامه {barname}*\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"✅ *آپلود شده ({len(docs)}/{len(DOC_KEYS)}):*\n{done_list}\n"
-    )
-    if missing_list:
-        summary += f"\n⬜ *آپلود نشده:*\n{missing_list}\n"
-    summary += "\n━━━━━━━━━━━━━━━━━━━━\n\nآیا همه چیز درست است؟"
-
-    await query.edit_message_text(
-        summary,
-        parse_mode="Markdown",
-        reply_markup=final_confirm_keyboard()
-    )
-    return WAIT_CONFIRM
-
-
-async def edit_docs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """نمایش منوی ویرایش مستندات"""
-    query = update.callback_query
-    await query.answer()
-
-    barname = context.user_data.get("barname", "")
-    docs = context.user_data.get("session_documents", {})
-
-    if not docs:
-        await query.edit_message_text(
-            "⚠️ هیچ مستندی برای ویرایش وجود ندارد.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_summary")],
-            ])
-        )
-        return WAIT_CONFIRM
-
-    await query.edit_message_text(
-        f"✏️ *ویرایش مستندات بارنامه {barname}*\n\n"
-        "کدام مستند را می‌خواهید دوباره آپلود کنید؟",
-        parse_mode="Markdown",
-        reply_markup=edit_docs_keyboard(docs)
-    )
-    return WAIT_CONFIRM
-
-
-async def edit_specific_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """شروع دوباره یک مستند خاص"""
-    query = update.callback_query
-    await query.answer()
-
-    doc_key = query.data.replace("edit_doc_", "")
-    idx = DOC_KEYS.index(doc_key) if doc_key in DOC_KEYS else 0
-
-    context.user_data["step"] = idx
-    context.user_data["pending_file"] = None
-
-    barname = context.user_data.get("barname", "")
-    session_docs = context.user_data.get("session_documents", {})
-    if doc_key in session_docs:
-        del session_docs[doc_key]
-
-    name = DOC_NAMES.get(doc_key, doc_key)
-    guide = DOC_GUIDES.get(doc_key, "")
-    has_prev = idx > 0
-
-    if doc_key == "other":
-        markup = skip_keyboard(has_prev=has_prev)
-    else:
-        markup = step_waiting_keyboard(has_prev=has_prev)
-
-    await query.edit_message_text(
-        f"🔄 *ویرایش {name}*\n\n"
-        f"📦 بارنامه: *{barname}*\n\n"
-        f"{guide}",
-        parse_mode="Markdown",
-        reply_markup=markup
-    )
-    return WAIT_PHOTO
-
-
-async def back_to_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """بازگشت به صفحه خلاصه"""
-    query = update.callback_query
-    await query.answer()
-    return await show_final_summary(query, context)
-
-
-async def dispatch_review_package(context, barname: str, db_data: dict) -> str:
-    """ارسال پکیج مستندات و دکمه‌های بررسی برای همه‌ی ادمین‌ها؛ یک شناسه بررسی جدید تولید می‌کند"""
-    rid = make_review_id()
-    db_data["review"] = {
-        "id": rid,
-        "status": "pending",
-        "reason": "",
-        "deduction_note": "",
-        "reviewed_by": None,
-        "reviewed_at": None,
-        "admin_messages": {},
-    }
-    add_barname_log(
-        db_data, "ارسال/نمایش مجدد مستندات برای بررسی",
-        detail=f"برای {len(ADMIN_IDS)} ادمین ارسال شد"
-    )
-    save_barname_data(barname, db_data)
-
-    docs = db_data.get("documents", {})
-    driver_id = db_data.get("driver_id")
-    driver_name = db_data.get("driver_name", "-")
-    driver_link = f"{driver_name} (آیدی: `{driver_id}`)" if driver_id else driver_name
-
-    if ADMIN_IDS:
-        for admin_id in ADMIN_IDS:
-            try:
-                # ارسال مستندات به صورت پکیج برای ادمین
-                for doc_key, doc_info in docs.items():
-                    await send_single_doc(
-                        context.bot, admin_id, doc_key, doc_info, barname,
-                        extra_caption=f"👤 فرستنده: {driver_link}",
-                        parse_mode="Markdown"
-                    )
-
-                package_text = (
-                    f"📦 مستندات بارنامه شماره `{barname}` توسط آیدی {driver_link} ارسال شد\n\n"
-                    f"📄 تعداد مستندات: {len(docs)}\n"
-                    f"🕐 زمان: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
-                    "برای مشاهده‌ی مجدد مستندات این بارنامه، دکمه‌ی «📦 نمایش مجدد مستندات» زیر همین پیام را بزنید.\n\n"
-                    "لطفاً بررسی و اقدام کنید:"
-                )
-                sent = await context.bot.send_message(
-                    chat_id=admin_id,
-                    text=package_text,
-                    parse_mode="Markdown",
-                    reply_markup=review_keyboard(rid, barname)
-                )
-                db_data = get_barname_data(barname)
-                db_data["review"]["admin_messages"][str(admin_id)] = sent.message_id
-                save_barname_data(barname, db_data)
-            except Exception as e:
-                logger.error(f"خطا در ارسال پکیج به ادمین {admin_id}: {e}")
-
-    return rid
-
-
-async def final_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """تایید نهایی — تنها از همین نقطه به بعد، مستندات در دیتابیس ذخیره و برای ادمین ارسال می‌شوند"""
-    query = update.callback_query
-    await query.answer()
-
-    barname = context.user_data.get("barname", "")
-    session_docs = context.user_data.get("session_documents", {})
-
-    if not barname or not session_docs:
-        await query.edit_message_text(
-            "⚠️ هیچ مستندی برای ثبت وجود ندارد.\nلطفاً از نو شروع کنید.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🆕 شروع مجدد", callback_data="start_upload")],
-                [InlineKeyboardButton("🏠 منوی اصلی", callback_data="back_to_main")],
-            ])
-        )
-        context.user_data.clear()
-        return ConversationHandler.END
-
-    # از همین‌جا به بعد، ثبت رسمی در دیتابیس انجام می‌شود
-    db_data = get_barname_data(barname)
-    if not db_data.get("created_at"):
-        db_data["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    db_data["driver_id"] = update.effective_user.id
-    db_data["driver_name"] = update.effective_user.full_name
-    db_data["documents"] = session_docs
-    db_data["completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    db_data["status"] = "completed"
-    add_barname_log(
-        db_data, "ارسال نهایی مستندات",
-        actor=f"{update.effective_user.full_name} (راننده)",
-        detail=f"{len(session_docs)} مستند ارسال شد"
-    )
-    save_barname_data(barname, db_data)
-
-    # فوروارد به کانال آرشیو (در صورت تنظیم) — فقط بعد از تایید نهایی
-    if STORAGE_CHANNEL_ID and str(STORAGE_CHANNEL_ID) not in [str(a) for a in ADMIN_IDS]:
-        for doc_key, doc_info in session_docs.items():
-            try:
-                await send_single_doc(
-                    context.bot, STORAGE_CHANNEL_ID, doc_key, doc_info, barname,
-                    extra_caption=f"👤 راننده: {update.effective_user.full_name}"
-                )
-            except Exception as e:
-                logger.error(f"خطا در فوروارد به کانال آرشیو: {e}")
-
-    await dispatch_review_package(context, barname, db_data)
-
-    await query.edit_message_text(
-        f"✅ *مستندات ارسال شد!*\n\n"
-        f"📦 بارنامه: {barname}\n\n"
-        f"🚛 *راننده گرامی،*\n"
-        f"مستندات شما برای بررسی به ادمین ارسال شد. نتیجه بررسی به‌زودی از طریق همین ربات به شما اطلاع داده خواهد شد.\n\n"
-        f"برای بارنامه جدید دکمه زیر را بزنید:",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🆕 بارنامه جدید", callback_data="start_upload")],
-            [InlineKeyboardButton("🏠 منوی اصلی", callback_data="back_to_main")],
-        ])
-    )
-    context.user_data.clear()
-    return ConversationHandler.END
-
-
-# ─────────── بررسی مستندات توسط ادمین ───────────
-
-async def _finalize_review(context, barname: str, db_data: dict, status_label: str):
-    """حذف دکمه‌های بررسی از پیام تمام ادمین‌ها و اطلاع‌رسانی تصمیم نهایی به آن‌ها"""
-    admin_messages = db_data.get("review", {}).get("admin_messages", {})
-    for admin_id_str, msg_id in admin_messages.items():
-        try:
-            await context.bot.edit_message_reply_markup(
-                chat_id=int(admin_id_str),
-                message_id=msg_id,
-                reply_markup=None
-            )
-        except Exception as e:
-            logger.error(f"خطا در حذف دکمه‌های ادمین {admin_id_str}: {e}")
-        try:
-            await context.bot.send_message(
-                chat_id=int(admin_id_str),
-                text=f"📦 بارنامه {barname}: {status_label}"
-            )
-        except Exception as e:
-            logger.error(f"خطا در اطلاع‌رسانی به ادمین {admin_id_str}: {e}")
-
-
-async def _send_partial_finalize_prompt(context, barname: str, db_data: dict, rid: str, text: str):
-    """برای بارنامه‌ای که «تایید با کسری بار» شده، به همه‌ی ادمین‌ها یک پیام با دکمه‌ی
-    «✅ تایید نهایی بارنامه» می‌فرستد. این دکمه در هر لحظه‌ای — چه راننده کسری را قبول کند،
-    چه نکند، چه اصلاً هنوز پاسخی نداده باشد — قابل استفاده است؛ تصمیم نهایی همیشه با ادمین است.
-    شناسه‌ی پیام‌های ارسالی ذخیره می‌شود تا بعد از تایید نهایی، دکمه از همه‌شان حذف شود."""
-    finalize_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ تایید نهایی بارنامه", callback_data=f"radm_fin_{rid}")]
-    ])
-    finalize_messages = dict(db_data.get("review", {}).get("finalize_messages", {}))
-    for admin_id in ADMIN_IDS:
-        try:
-            sent = await context.bot.send_message(chat_id=admin_id, text=text, reply_markup=finalize_kb)
-            finalize_messages[str(admin_id)] = sent.message_id
-        except Exception as e:
-            logger.error(f"خطا در ارسال دکمه تایید نهایی به ادمین {admin_id}: {e}")
-
-    db_data = get_barname_data(barname)  # تازه‌سازی قبل از ذخیره تا رویدادهای اخیر پاک نشوند
-    db_data.setdefault("review", {})["finalize_messages"] = finalize_messages
-    save_barname_data(barname, db_data)
-
-
-async def review_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تایید مستندات توسط ادمین"""
-    query = update.callback_query
-    user = query.from_user
-    if user.id not in ADMIN_IDS:
-        logger.warning(f"⛔️ تلاش دسترسی غیرمجاز به دکمه ادمین توسط آیدی {user.id} (لیست ادمین‌های مجاز: {ADMIN_IDS})")
-        await query.answer("⛔️ دسترسی ندارید.", show_alert=True)
-        return
-
-    rid = query.data.replace("radm_appr_", "")
-    barname, db_data = find_barname_by_review_id(rid)
-    if not barname or db_data.get("review", {}).get("status") != "pending":
-        logger.warning(f"⚠️ درخواست بررسی نامعتبر — rid={rid} یافت‌نشد یا قبلاً بررسی شده (دیتابیس ممکن است ری‌ست شده باشد)")
-        await query.answer("⚠️ این درخواست دیگر معتبر نیست یا قبلاً بررسی شده.", show_alert=True)
-        return
-
-    await query.answer("✅ تأیید شد")
-
-    db_data["review"]["status"] = "approved"
-    db_data["review"]["reviewed_by"] = user.id
-    db_data["review"]["reviewed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    add_barname_log(db_data, "تایید مستندات", actor=f"{user.first_name} (ادمین، از طریق ربات)")
-    save_barname_data(barname, db_data)
-
-    driver_id = db_data.get("driver_id")
-    if driver_id:
-        try:
-            await context.bot.send_message(
-                chat_id=driver_id,
-                text=(
-                    f"✅ راننده محترم مستندات ارسالی بارنامه شماره {barname} شما تایید شد "
-                    "و ظرف ۲ روز کاری هزینه بارنامه به شماره حساب اعلامی شما واریز خواهد شد."
-                ),
-                reply_markup=driver_reply_keyboard()
-            )
-        except Exception as e:
-            logger.error(f"خطا در اطلاع‌رسانی به راننده: {e}")
-
-    await _finalize_review(context, barname, db_data, f"✅ تأیید شد توسط {user.first_name}")
-
-
-async def review_finalize(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تایید نهایی بارنامه‌ای که «تایید با کسری بار» شده — چه راننده کسری را پذیرفته باشد،
-    چه نپذیرفته باشد، چه هنوز پاسخی نداده باشد؛ تصمیم نهایی همیشه با ادمین است."""
-    query = update.callback_query
-    user = query.from_user
-    if user.id not in ADMIN_IDS:
-        logger.warning(f"⛔️ تلاش دسترسی غیرمجاز به دکمه ادمین توسط آیدی {user.id} (لیست ادمین‌های مجاز: {ADMIN_IDS})")
-        await query.answer("⛔️ دسترسی ندارید.", show_alert=True)
-        return
-
-    rid = query.data.replace("radm_fin_", "")
-    barname, db_data = find_barname_by_review_id(rid)
-    if not barname or db_data.get("review", {}).get("status") != "partial":
-        await query.answer("⚠️ این درخواست دیگر معتبر نیست یا قبلاً نهایی شده.", show_alert=True)
-        return
-
-    await query.answer("✅ تایید نهایی شد")
-
-    resp = db_data["review"].get("driver_response")
-    resp_label = "پذیرفته بود" if resp == "accepted" else ("نپذیرفته بود" if resp == "rejected" else "هنوز پاسخی نداده بود")
-
-    db_data["review"]["status"] = "approved"
-    db_data["review"]["reviewed_by"] = user.id
-    db_data["review"]["reviewed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    add_barname_log(
-        db_data, "تایید نهایی بارنامه (پس از کسری بار)",
-        actor=f"{user.first_name} (ادمین، از طریق ربات)",
-        detail=f"راننده کسری بار را {resp_label}"
-    )
-    save_barname_data(barname, db_data)
-
-    driver_id = db_data.get("driver_id")
-    if driver_id:
-        try:
-            await context.bot.send_message(
-                chat_id=driver_id,
-                text=(
-                    f"✅ راننده محترم بارنامه شماره {barname} شما به‌صورت نهایی تایید شد "
-                    "و ظرف ۲ روز کاری هزینه بارنامه (با احتساب کسری بار توافق‌شده) "
-                    "به شماره حساب اعلامی شما واریز خواهد شد."
-                ),
-                reply_markup=driver_reply_keyboard()
-            )
-        except Exception as e:
-            logger.error(f"خطا در اطلاع‌رسانی به راننده: {e}")
-
-    # حذف دکمه‌ی «تایید نهایی» از پیام تمام ادمین‌ها
-    finalize_messages = db_data.get("review", {}).get("finalize_messages", {})
-    for admin_id_str, msg_id in finalize_messages.items():
-        try:
-            await context.bot.edit_message_reply_markup(
-                chat_id=int(admin_id_str), message_id=msg_id, reply_markup=None
-            )
-        except Exception as e:
-            logger.error(f"خطا در حذف دکمه تایید نهایی ادمین {admin_id_str}: {e}")
-
-    await _finalize_review(context, barname, db_data, f"✅ تایید نهایی شد توسط {user.first_name} (پس از کسری بار)")
-
-
-async def review_reject_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """شروع فرایند ثبت علت عدم تایید"""
-    query = update.callback_query
-    user = query.from_user
-    if user.id not in ADMIN_IDS:
-        logger.warning(f"⛔️ تلاش دسترسی غیرمجاز به دکمه ادمین توسط آیدی {user.id} (لیست ادمین‌های مجاز: {ADMIN_IDS})")
-        await query.answer("⛔️ دسترسی ندارید.", show_alert=True)
-        return
-
-    rid = query.data.replace("radm_rej_", "")
-    barname, db_data = find_barname_by_review_id(rid)
-    if not barname or db_data.get("review", {}).get("status") != "pending":
-        logger.warning(f"⚠️ درخواست بررسی نامعتبر — rid={rid} یافت‌نشد یا قبلاً بررسی شده (دیتابیس ممکن است ری‌ست شده باشد)")
-        await query.answer("⚠️ این درخواست دیگر معتبر نیست یا قبلاً بررسی شده.", show_alert=True)
-        return
-
-    await query.answer()
-    context.user_data["review_pending"] = {"action": "reject", "rid": rid, "barname": barname}
-
-    await context.bot.send_message(
-        chat_id=user.id,
-        text=f"❌ لطفاً *علت عدم تأیید* مستندات بارنامه {barname} را بنویسید:",
-        parse_mode="Markdown"
-    )
-
-
-async def review_partial_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """شروع فرایند ثبت توضیح تایید با کسری بار"""
-    query = update.callback_query
-    user = query.from_user
-    if user.id not in ADMIN_IDS:
-        logger.warning(f"⛔️ تلاش دسترسی غیرمجاز به دکمه ادمین توسط آیدی {user.id} (لیست ادمین‌های مجاز: {ADMIN_IDS})")
-        await query.answer("⛔️ دسترسی ندارید.", show_alert=True)
-        return
-
-    rid = query.data.replace("radm_part_", "")
-    barname, db_data = find_barname_by_review_id(rid)
-    if not barname or db_data.get("review", {}).get("status") != "pending":
-        logger.warning(f"⚠️ درخواست بررسی نامعتبر — rid={rid} یافت‌نشد یا قبلاً بررسی شده (دیتابیس ممکن است ری‌ست شده باشد)")
-        await query.answer("⚠️ این درخواست دیگر معتبر نیست یا قبلاً بررسی شده.", show_alert=True)
-        return
-
-    await query.answer()
-    context.user_data["review_pending"] = {"action": "partial", "rid": rid, "barname": barname}
-
-    await context.bot.send_message(
-        chat_id=user.id,
-        text=(
-            f"⚠️ لطفاً *مقدار کسری بار* مربوط به بارنامه {barname} را بنویسید:\n\n"
-            "_(مثال: ۲ تن، یا ۳ کیسه)_"
-        ),
-        parse_mode="Markdown"
-    )
-
-
-# ─────────── پاسخ راننده به تایید با کسری بار ───────────
-
-async def driver_partial_accept(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """راننده کسری بار را قبول می‌کند — وضعیت هنوز «تایید شد» نمی‌شود؛
-    تصمیم نهایی با دکمه‌ی «تایید نهایی» در اختیار ادمین می‌ماند."""
-    query = update.callback_query
-    rid = query.data.replace("drv_ok_", "")
-    barname, db_data = find_barname_by_review_id(rid)
-
-    if not barname or db_data.get("review", {}).get("status") != "partial" or db_data["review"].get("driver_response"):
-        await query.answer("⚠️ این درخواست دیگر معتبر نیست یا قبلاً پاسخ داده شده.", show_alert=True)
-        return
-
-    await query.answer("✅ ثبت شد")
-    await query.edit_message_reply_markup(reply_markup=None)
-
-    db_data["review"]["driver_response"] = "accepted"
-    add_barname_log(db_data, "پذیرش کسری بار توسط راننده", actor=f"{query.from_user.full_name} (راننده)")
-    save_barname_data(barname, db_data)
-
-    await query.message.reply_text(
-        "✅ پاسخ شما ثبت شد. پس از تایید نهایی ادمین، هزینه بارنامه واریز خواهد شد.",
-        reply_markup=driver_reply_keyboard()
-    )
-
-    await _send_partial_finalize_prompt(
-        context, barname, db_data, rid,
-        text=(
-            f"✅ راننده کسری بار بارنامه شماره {barname} را پذیرفت.\n\n"
-            "برای نهایی‌شدن و اطلاع‌رسانی واریز به راننده، دکمه‌ی زیر را بزنید 👇"
-        )
-    )
-
-
-async def driver_partial_reject_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """راننده کسری بار را قبول ندارد — شروع دریافت علت"""
-    query = update.callback_query
-    rid = query.data.replace("drv_no_", "")
-    barname, db_data = find_barname_by_review_id(rid)
-
-    if not barname or db_data.get("review", {}).get("status") != "partial" or db_data["review"].get("driver_response"):
-        await query.answer("⚠️ این درخواست دیگر معتبر نیست یا قبلاً پاسخ داده شده.", show_alert=True)
-        return
-
-    await query.answer()
-    await query.edit_message_reply_markup(reply_markup=None)
-
-    context.user_data["driver_dispute_pending"] = {"rid": rid, "barname": barname}
-
-    await query.message.reply_text("❌ لطفاً *علت عدم تایید* کسری بار را بنویسید:", parse_mode="Markdown")
-
-
-# ─────────── پنل ادمین ───────────
-
-async def admin_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """بازگشت به پنل ادمین"""
-    query = update.callback_query
-    await query.answer()
-    context.user_data.pop("admin_action", None)
-
-    try:
-        await query.edit_message_text(
-            "🔐 *پنل مدیریت پی‌بار*\n\nاز منوی زیر انتخاب کنید:",
-            parse_mode="Markdown",
-            reply_markup=admin_keyboard()
-        )
-    except Exception as e:
-        # اگه پیام قابل ویرایش نبود (مثلاً پیام قدیمی/حاوی عکس بود)، یک پیام جدید می‌فرستیم
-        logger.warning(f"⚠️ ویرایش پیام در admin_back ناموفق بود ({e})؛ پیام جدید ارسال می‌شود.")
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="🔐 *پنل مدیریت پی‌بار*\n\nاز منوی زیر انتخاب کنید:",
-            parse_mode="Markdown",
-            reply_markup=admin_keyboard()
-        )
-
-
-async def admin_get_docs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data["admin_action"] = "get_docs"
-
-    await query.edit_message_text(
-        "🔍 *دریافت مستندات*\n\nشماره بارنامه مورد نظر را وارد کنید:",
-        parse_mode="Markdown",
-        reply_markup=admin_back_keyboard()
-    )
-
-
-async def admin_delete_barname(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data["admin_action"] = "delete_barname"
-
-    await query.edit_message_text(
-        "🗑 *حذف بارنامه*\n\nشماره بارنامه‌ای که می‌خواهید حذف کنید را وارد کنید:",
-        parse_mode="Markdown",
-        reply_markup=admin_back_keyboard()
-    )
-
-
-async def admin_attach_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data["admin_action"] = "attach_barname"
-    context.user_data.pop("admin_attach_barname", None)
-
-    await query.edit_message_text(
-        "📎 *افزودن عکس/فایل به بارنامه*\n\nشماره بارنامه‌ای که می‌خواهید بهش عکس یا فایل اضافه کنید را وارد کنید:",
-        parse_mode="Markdown",
-        reply_markup=admin_back_keyboard()
-    )
-
-
-async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    db = load_db()
-    total = len(db)
-    completed = sum(1 for d in db.values() if d.get("status") == "completed")
-    pending = total - completed
-    total_docs = sum(len(d.get("documents", {})) for d in db.values())
-
-    await query.edit_message_text(
-        f"📈 *آمار کلی پی‌بار*\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📦 کل بارنامه‌ها: *{total}*\n"
-        f"✅ تکمیل‌شده: *{completed}*\n"
-        f"⏳ در انتظار: *{pending}*\n"
-        f"📄 کل مستندات: *{total_docs}*\n"
-        f"━━━━━━━━━━━━━━━━━━━━",
-        parse_mode="Markdown",
-        reply_markup=admin_back_keyboard()
-    )
-
-
-async def admin_list_barnames(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    db = load_db()
-    if not db:
-        await query.edit_message_text(
-            "📭 هیچ بارنامه‌ای ثبت نشده.",
-            reply_markup=admin_keyboard()
-        )
-        return
-
-    lines = []
-    for barname, data in sorted(db.items(), key=lambda x: x[1].get("created_at", ""), reverse=True):
-        status = review_status_label(data)
-        doc_count = len(data.get("documents", {}))
-        created = data.get("created_at", "-")
-        lines.append(f"{status} | `{barname}` | {doc_count} مستند | {created}")
-
-    text = "📊 *لیست بارنامه‌ها:*\n\n" + "\n".join(lines[:20])
-    if len(db) > 20:
-        text += f"\n\n... و {len(db)-20} بارنامه دیگر"
-
-    await query.edit_message_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=admin_back_keyboard()
-    )
-
-
-def build_approved_list_content():
-    """متن و کیبورد لیست بارنامه‌های تایید شده در ۵ روز اخیر"""
-    db = load_db()
-    cutoff = datetime.now() - timedelta(days=5)
-    rows = []
-    for barname, data in db.items():
-        review = data.get("review", {})
-        if review.get("status") != "approved":
-            continue
-        reviewed_at = review.get("reviewed_at", "")
-        try:
-            reviewed_dt = datetime.strptime(reviewed_at, "%Y-%m-%d %H:%M")
-        except (ValueError, TypeError):
-            continue
-        if reviewed_dt >= cutoff:
-            rows.append((barname, data, reviewed_dt))
-
-    if not rows:
-        return "📭 در ۵ روز گذشته بارنامه تایید شده‌ای ثبت نشده.", admin_back_keyboard()
-
-    rows.sort(key=lambda x: x[2], reverse=True)
-    lines = []
-    for barname, data, reviewed_dt in rows:
-        lines.append(
-            f"✅ `{barname}` | راننده: {data.get('driver_name', '-')} | "
-            f"{reviewed_dt.strftime('%Y-%m-%d %H:%M')}"
-        )
-
-    text = "✅ *بارنامه‌های تایید شده (۵ روز اخیر):*\n\n" + "\n".join(lines[:30])
-    if len(rows) > 30:
-        text += f"\n\n... و {len(rows)-30} بارنامه دیگر"
-
-    return text, admin_back_keyboard()
-
-
-PENDING_PAGE_SIZE = 8
-
-def build_pending_list_content(page: int = 0):
-    """متن و کیبورد لیست بارنامه‌های نیازمند بررسی / تایید نشده (صفحه‌بندی‌شده تا در یک پیام جا بشه)"""
-    db = load_db()
-    rows = []
-    for barname, data in db.items():
-        review = data.get("review", {})
-        status = review.get("status")
-        if status == "approved":
-            continue
-        if not data.get("documents"):
-            continue
-        rows.append((barname, data))
-
-    if not rows:
-        return "📭 در حال حاضر بارنامه‌ای در انتظار بررسی یا تایید‌نشده وجود ندارد.", admin_back_keyboard()
-
-    rows.sort(key=lambda x: x[1].get("created_at", ""), reverse=True)
-
-    total_pages = max(1, (len(rows) + PENDING_PAGE_SIZE - 1) // PENDING_PAGE_SIZE)
-    page = max(0, min(page, total_pages - 1))
-    start = page * PENDING_PAGE_SIZE
-    page_rows = rows[start:start + PENDING_PAGE_SIZE]
-
-    buttons = []
-    for barname, data in page_rows:
-        label = f"{review_status_label(data)} — {barname}"
-        token = make_barname_token(barname)
-        buttons.append([InlineKeyboardButton(label, callback_data=f"admin_open_{token}")])
-
-    nav_row = []
-    if page > 0:
-        nav_row.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"admin_pending_page_{page-1}"))
-    if page < total_pages - 1:
-        nav_row.append(InlineKeyboardButton("بعدی ▶️", callback_data=f"admin_pending_page_{page+1}"))
-    if nav_row:
-        buttons.append(nav_row)
-
-    buttons.append([InlineKeyboardButton("🔙 بازگشت به پنل ادمین", callback_data="admin_back")])
-
-    text = (
-        "🕐 *بارنامه‌های نیازمند بررسی / تایید نشده:*\n\n"
-        "برای مشاهده‌ی مجدد مستندات و اقدام روی هرکدام، آن را انتخاب کنید 👇\n\n"
-        f"_(صفحه {page+1} از {total_pages} — مجموعاً {len(rows)} بارنامه)_"
-    )
-
-    return text, InlineKeyboardMarkup(buttons)
-
-
-async def admin_approved_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """لیست بارنامه‌های تایید شده تا ۵ روز گذشته"""
-    query = update.callback_query
-    await query.answer()
-    text, markup = build_approved_list_content()
-    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
-
-
-async def admin_pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """لیست بارنامه‌هایی که واکنش نشان داده نشده یا تایید نشده‌اند - قابل انتخاب برای بررسی مجدد"""
-    query = update.callback_query
-    await query.answer()
-    text, markup = build_pending_list_content(page=0)
-    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
-
-
-async def admin_pending_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """جابه‌جایی صفحه در لیست نیازمند بررسی (بدون ارسال پیام جدید)"""
-    query = update.callback_query
-    await query.answer()
-    try:
-        page = int(query.data.replace("admin_pending_page_", ""))
-    except ValueError:
-        page = 0
-    text, markup = build_pending_list_content(page=page)
-    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
-
-
-async def admin_open_barname(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """نمایش مجدد مستندات یک بارنامه‌ی خاص برای ادمین.
-    نکته‌ی مهم: این تابع هرگز نباید بارنامه‌ای را که قبلاً «تایید با کسری بار»، «تایید شده»
-    یا «عدم تایید» شده دوباره به «در انتظار بررسی» برگرداند — فقط برای بارنامه‌های واقعاً
-    جدید/در انتظار، یک پکیج بررسی کامل (با دکمه‌های تایید/رد/کسری) ارسال می‌کند."""
-    query = update.callback_query
-    user = query.from_user
-    if user.id not in ADMIN_IDS:
-        logger.warning(f"⛔️ تلاش دسترسی غیرمجاز به دکمه ادمین توسط آیدی {user.id} (لیست ادمین‌های مجاز: {ADMIN_IDS})")
-        await query.answer("⛔️ دسترسی ندارید.", show_alert=True)
-        return
-
-    token = query.data.replace("admin_open_", "")
-    barname = find_barname_by_token(token)
-    if not barname:
-        await query.answer("⚠️ بارنامه یافت نشد.", show_alert=True)
-        return
-
-    db_data = get_barname_data(barname)
-    if not db_data.get("documents"):
-        await query.answer("⚠️ این بارنامه مستندی ندارد.", show_alert=True)
-        return
-
-    review = db_data.get("review", {})
-    status = review.get("status")
-    driver_link = f"{db_data.get('driver_name', '-')} (آیدی: `{db_data.get('driver_id')}`)"
-
-    if status == "partial":
-        # هنوز در انتظار تایید نهاییه — فقط اطلاعات فعلی + دکمه‌ی «تایید نهایی» دوباره فرستاده می‌شود
-        await query.answer("در حال ارسال مستندات...")
-        for doc_key, doc_info in db_data.get("documents", {}).items():
-            try:
-                await send_single_doc(
-                    context.bot, user.id, doc_key, doc_info, barname,
-                    extra_caption=f"👤 فرستنده: {driver_link}", parse_mode="Markdown"
-                )
-            except Exception as e:
-                logger.error(f"خطا در ارسال مستند {doc_key}: {e}")
-
-        resp = review.get("driver_response")
-        resp_label = "✅ پذیرفته" if resp == "accepted" else ("❌ نپذیرفته" if resp == "rejected" else "🕐 هنوز پاسخی نداده")
-        await _send_partial_finalize_prompt(
-            context, barname, db_data, review.get("id", ""),
-            text=(
-                f"📦 بارنامه {barname} همچنان در وضعیت «تایید با کسری بار» است.\n\n"
-                f"⚠️ مقدار کسری: {review.get('deduction_note', '-')}\n"
-                f"👤 پاسخ راننده: {resp_label}\n\n"
-                "برای تایید نهایی، دکمه‌ی زیر را بزنید 👇"
-            )
-        )
-        return
-
-    if status in ("approved", "rejected"):
-        # تصمیم قبلاً نهایی شده — فقط مستندات برای مرور دوباره فرستاده می‌شود، بدون تغییر وضعیت
-        await query.answer("در حال ارسال مستندات...")
-        for doc_key, doc_info in db_data.get("documents", {}).items():
-            try:
-                await send_single_doc(
-                    context.bot, user.id, doc_key, doc_info, barname,
-                    extra_caption=f"👤 فرستنده: {driver_link}", parse_mode="Markdown"
-                )
-            except Exception as e:
-                logger.error(f"خطا در ارسال مستند {doc_key}: {e}")
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=f"📦 بارنامه {barname} — {review_status_label(db_data)}\n(این بارنامه قبلاً نهایی شده و دیگر قابل تغییر نیست.)"
-        )
-        return
-
-    # status == "pending" یا اصلاً بررسی‌ای شروع نشده → پکیج بررسی کامل با دکمه‌های تایید/رد/کسری
-    await query.answer("در حال ارسال مستندات...")
-    await dispatch_review_package(context, barname, db_data)
-
-
-async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-
-    # ─── پاسخ راننده به «مورد تایید نیست» برای کسری بار (برای همه کاربران، نه فقط ادمین) ───
-    dispute = context.user_data.get("driver_dispute_pending")
-    if dispute:
-        rid = dispute["rid"]
-        barname = dispute["barname"]
-        note_text = update.message.text.strip()
-
-        _, db_data = find_barname_by_review_id(rid)
-        if not db_data or db_data.get("review", {}).get("status") != "partial" or db_data["review"].get("driver_response"):
-            await update.message.reply_text(
-                "⚠️ این درخواست دیگر معتبر نیست یا قبلاً پاسخ داده شده.",
-                reply_markup=driver_reply_keyboard()
-            )
-            context.user_data.pop("driver_dispute_pending", None)
-            return
-
-        db_data["review"]["driver_response"] = "rejected"
-        db_data["review"]["driver_reason"] = note_text
-        add_barname_log(
-            db_data, "عدم پذیرش کسری بار توسط راننده",
-            actor=f"{user.full_name} (راننده)", detail=note_text
-        )
-        save_barname_data(barname, db_data)
-
-        driver_link = f"{user.full_name} (آیدی: `{user.id}`)"
-        for admin_id in ADMIN_IDS:
-            try:
-                await context.bot.send_message(
-                    chat_id=admin_id,
-                    text=(
-                        f"❌ راننده کسری بار بارنامه شماره {barname} را قبول ندارد.\n\n"
-                        f"📝 علت: {note_text}\n"
-                        f"👤 راننده: {driver_link}\n\n"
-                        "لطفاً جهت هماهنگی، مستقیماً با راننده ارتباط بگیرید."
-                    ),
-                    parse_mode="Markdown"
-                )
-            except Exception as e:
-                logger.error(f"خطا در اطلاع‌رسانی به ادمین {admin_id}: {e}")
-
-        await _send_partial_finalize_prompt(
-            context, barname, db_data, rid,
-            text=(
-                f"📦 بارنامه شماره {barname} — راننده کسری بار را نپذیرفت.\n\n"
-                "پس از هماهنگی با راننده، هر زمان که خواستید می‌توانید با دکمه‌ی زیر "
-                "این بارنامه را همچنان تایید نهایی کنید 👇"
-            )
-        )
-
-        await update.message.reply_text(
-            f"راننده محترم با توجه به عدم تایید کسری بار توسط شما، به آیدی ادمین {ADMIN_USERNAME} پیام دهید.",
-            reply_markup=driver_reply_keyboard()
-        )
-        context.user_data.pop("driver_dispute_pending", None)
-        return
-
-    if user.id not in ADMIN_IDS:
-        return
-
-    # ─── پاسخ ادمین به عدم تایید / تایید با کسری بار ───
-    review_pending = context.user_data.get("review_pending")
-    if review_pending:
-        rid = review_pending["rid"]
-        r_action = review_pending["action"]
-        note_text = update.message.text.strip()
-
-        barname, db_data = find_barname_by_review_id(rid)
-        if not barname or db_data.get("review", {}).get("status") != "pending":
-            await update.message.reply_text(
-                "⚠️ این درخواست دیگر معتبر نیست یا قبلاً بررسی شده.",
-                reply_markup=admin_keyboard()
-            )
-            context.user_data.pop("review_pending", None)
-            return
-
-        db_data["review"]["reviewed_by"] = user.id
-        db_data["review"]["reviewed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-        driver_id = db_data.get("driver_id")
-
-        if r_action == "reject":
-            db_data["review"]["status"] = "rejected"
-            db_data["review"]["reason"] = note_text
-            add_barname_log(
-                db_data, "عدم تایید مستندات",
-                actor=f"{user.first_name} (ادمین، از طریق ربات)", detail=note_text
-            )
-            save_barname_data(barname, db_data)
-
-            if driver_id:
-                try:
-                    resubmit_token = make_barname_token(barname)
-                    await context.bot.send_message(
-                        chat_id=driver_id,
-                        text=(
-                            f"❌ راننده محترم مستندات ارسالی مربوط به بارنامه شماره {barname} "
-                            f"به دلیل «{note_text}» مورد تایید قرار نگرفت، "
-                            "لطفا مجددا مستندات را به صورت واضح و کامل ارسال نمایید."
-                        ),
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("🔄 بارگذاری مجدد مستندات", callback_data=f"resubmit_{resubmit_token}")]
-                        ])
-                    )
-                    await context.bot.send_message(
-                        chat_id=driver_id,
-                        text="👇 همچنین می‌توانید از منوی پایین صفحه استفاده کنید.",
-                        reply_markup=driver_reply_keyboard()
-                    )
-                except Exception as e:
-                    logger.error(f"خطا در اطلاع‌رسانی به راننده: {e}")
-
-            await update.message.reply_text(
-                f"❌ عدم تأیید بارنامه {barname} ثبت و به راننده اطلاع داده شد.",
-                reply_markup=admin_keyboard()
-            )
-            await _finalize_review(context, barname, db_data, f"❌ عدم تأیید (علت: {note_text})")
-
-        elif r_action == "partial":
-            db_data["review"]["status"] = "partial"
-            db_data["review"]["deduction_note"] = note_text
-            db_data["review"]["driver_response"] = None
-            add_barname_log(
-                db_data, "تایید با کسری بار",
-                actor=f"{user.first_name} (ادمین، از طریق ربات)", detail=note_text
-            )
-            save_barname_data(barname, db_data)
-
-            if driver_id:
-                try:
-                    await context.bot.send_message(
-                        chat_id=driver_id,
-                        text=(
-                            f"⚠️ راننده محترم طبق بررسی حواله و رسید ارسالی مقدار {note_text} "
-                            "کسری بار دارید که هزینه آن می‌بایست از مبلغ بارنامه کسر شود.\n\n"
-                            "آیا این کسری بار مورد تایید شماست؟"
-                        ),
-                        reply_markup=driver_partial_response_keyboard(rid)
-                    )
-                    await context.bot.send_message(
-                        chat_id=driver_id,
-                        text="👇 همچنین می‌توانید از منوی پایین صفحه استفاده کنید.",
-                        reply_markup=driver_reply_keyboard()
-                    )
-                except Exception as e:
-                    logger.error(f"خطا در اطلاع‌رسانی به راننده: {e}")
-
-            await update.message.reply_text(
-                f"⚠️ تأیید با کسری بار برای بارنامه {barname} ثبت و به راننده اطلاع داده شد. "
-                "پاسخ راننده به‌زودی برای شما ارسال خواهد شد.",
-                reply_markup=admin_keyboard()
-            )
-            await _finalize_review(context, barname, db_data, f"⚠️ تأیید با کسری بار ({note_text}) — در انتظار پاسخ راننده")
-            await _send_partial_finalize_prompt(
-                context, barname, db_data, rid,
-                text=(
-                    f"📦 بارنامه {barname} در وضعیت «کسری بار» قرار گرفت.\n\n"
-                    "هر زمان که خواستید — چه راننده پاسخ بدهد چه ندهد — می‌توانید با دکمه‌ی زیر "
-                    "آن را تایید نهایی کنید 👇"
-                )
-            )
-
-        context.user_data.pop("review_pending", None)
-        return
-
-    action = context.user_data.get("admin_action")
-    if not action:
-        return
-
-    barname = update.message.text.strip()
-
-    # ─── حذف بارنامه ───
-    if action == "delete_barname":
-        db = load_db()
-        if barname not in db:
-            await update.message.reply_text(
-                f"❌ بارنامه *{barname}* یافت نشد.",
-                parse_mode="Markdown",
-                reply_markup=admin_keyboard()
-            )
-        else:
-            del db[barname]
-            save_db(db)
-            await update.message.reply_text(
-                f"🗑 بارنامه *{barname}* با موفقیت حذف شد.",
-                parse_mode="Markdown",
-                reply_markup=admin_keyboard()
-            )
-        context.user_data.pop("admin_action", None)
-        return
-
-    # ─── دریافت شماره بارنامه برای افزودن عکس/فایل ───
-    if action == "attach_barname":
-        db_data = get_barname_data(barname)
-        if not db_data.get("created_at"):
-            await update.message.reply_text(
-                f"❌ بارنامه *{barname}* یافت نشد. لطفاً دوباره شماره بارنامه را وارد کنید یا /start را بزنید.",
-                parse_mode="Markdown",
-                reply_markup=admin_keyboard()
-            )
-            context.user_data.pop("admin_action", None)
-            return
-
-        context.user_data["admin_action"] = "attach_file"
-        context.user_data["admin_attach_barname"] = barname
-        await update.message.reply_text(
-            f"📎 حالا عکس یا فایل مورد نظر برای بارنامه *{barname}* را ارسال کنید.\n"
-            "_(می‌توانید یک توضیح کوتاه هم به‌عنوان کپشن همراه عکس/فایل بنویسید — اختیاری)_",
-            parse_mode="Markdown"
-        )
-        return
-
-    # ─── دریافت مستندات ───
-    if action == "get_docs":
-        db_data = get_barname_data(barname)
-
-        if not db_data.get("documents"):
-            await update.message.reply_text(
-                f"❌ بارنامه *{barname}* یافت نشد یا مستندی ندارد.",
-                parse_mode="Markdown",
-                reply_markup=admin_keyboard()
-            )
-            context.user_data.pop("admin_action", None)
-            return
-
-        docs = db_data["documents"]
-        driver_id = db_data.get("driver_id")
-        driver_link = f"{db_data.get('driver_name', '-')} (آیدی: `{driver_id}`)" if driver_id else db_data.get('driver_name', '-')
-        await update.message.reply_text(
-            f"📦 *بارنامه {barname}*\n"
-            f"👤 راننده: {driver_link}\n"
-            f"📅 تاریخ: {db_data.get('created_at', '-')}\n"
-            f"📄 تعداد: {len(docs)} مستند\n"
-            f"📌 وضعیت: {review_status_label(db_data)}\n\n"
-            "در حال ارسال...",
-            parse_mode="Markdown"
-        )
-
-        for doc_key, doc_info in docs.items():
-            try:
-                await send_single_doc(
-                    context.bot, user.id, doc_key, doc_info, barname,
-                    extra_caption=f"👤 فرستنده: {driver_link}\n🕐 {doc_info.get('uploaded_at', '-')}",
-                    parse_mode="Markdown"
-                )
-            except Exception as e:
-                label = DOC_NAMES.get(doc_key, doc_key)
-                await update.message.reply_text(f"⚠️ خطا در ارسال {label}: {e}")
-
-        await update.message.reply_text(
-            f"✅ همه مستندات بارنامه *{barname}* ارسال شد.",
-            parse_mode="Markdown",
-            reply_markup=admin_keyboard()
-        )
-        context.user_data.pop("admin_action", None)
-
-
-async def admin_attach_receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دریافت عکس/فایلی که ادمین می‌خواهد به یک بارنامه اضافه کند (خارج از فلوی مکالمه‌ی راننده)"""
-    user = update.effective_user
-    if user.id not in ADMIN_IDS:
-        return
-    if context.user_data.get("admin_action") != "attach_file":
-        return
-
-    barname = context.user_data.get("admin_attach_barname")
-    if not barname:
-        context.user_data.pop("admin_action", None)
-        return
-
-    photo = update.message.photo[-1] if update.message.photo else None
-    doc = update.message.document
-    caption = (update.message.caption or "").strip()
-
-    if photo:
-        file_id, file_type = photo.file_id, "photo"
-    elif doc:
-        file_id, file_type = doc.file_id, "document"
-    else:
-        await update.message.reply_text("⚠️ لطفاً یک عکس یا فایل ارسال کنید.")
-        return
-
-    data = get_barname_data(barname)
-    if not data.get("created_at"):
-        await update.message.reply_text(
-            f"❌ بارنامه *{barname}* دیگر پیدا نشد (شاید حذف شده).",
-            parse_mode="Markdown",
-            reply_markup=admin_keyboard()
-        )
-        context.user_data.pop("admin_action", None)
-        context.user_data.pop("admin_attach_barname", None)
-        return
-
-    attachments = data.setdefault("admin_attachments", [])
-    attachments.append({
-        "id": uuid.uuid4().hex[:10],
-        "source": "bot",
-        "file_id": file_id,
-        "file_type": file_type,
-        "caption": caption,
-        "uploaded_by": f"{user.first_name} (ادمین)",
-        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-    })
-    add_barname_log(
-        data, "افزودن عکس/فایل توسط ادمین",
-        actor=f"{user.first_name} (ادمین، از طریق ربات)", detail=caption
-    )
-    save_barname_data(barname, data)
-
-    context.user_data.pop("admin_action", None)
-    context.user_data.pop("admin_attach_barname", None)
-
-    await update.message.reply_text(
-        f"✅ عکس/فایل به بارنامه *{barname}* اضافه شد و در داشبورد هم قابل مشاهده است.\n\n"
-        "برای افزودن مورد دیگر به همین بارنامه یا بارنامه‌ی دیگر، دوباره از منو «📎 افزودن عکس/فایل» را بزنید.",
-        parse_mode="Markdown",
-        reply_markup=admin_keyboard()
-    )
-
-
-async def reply_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """هندلر دکمه‌های منوی پایین صفحه"""
-    text = update.message.text
-    user = update.effective_user
-    is_admin = user.id in ADMIN_IDS
-
-    # ─── دکمه‌های راننده ───
-    if text == "🚀 آپلود مستندات":
-        await update.message.reply_text(
-            "📝 لطفاً *شماره بارنامه* را وارد کنید:",
-            parse_mode="Markdown",
-            reply_markup=barname_entry_keyboard()
-        )
-        return WAIT_BARNAME
-
-    elif text == "📋 راهنما":
-        await update.message.reply_text(
-            "📋 *راهنمای استفاده از ربات پی‌بار*\n\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "🔹 *مستندات مورد نیاز:*\n"
-            "۱. 📄 اصل بارنامه\n"
-            "۲. 🔵 حواله بار مبدأ\n"
-            "۳. 🔴 رسید بار مقصد\n"
-            "۴. 💳 شماره حساب بانک تجارت یا شماره شبا (به نام راننده اول یا دوم بارنامه)\n\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "💡 *نکات مهم:*\n"
-            "• عکس‌ها باید واضح و خوانا باشند\n"
-            "• در هر مرحله می‌توانید برگردید\n"
-            "• /cancel برای لغو کامل عملیات",
-            parse_mode="Markdown",
-            reply_markup=driver_reply_keyboard()
-        )
-
-    elif text == "📦 وضعیت بارنامه":
-        rows = get_driver_barnames(user.id)
-
-        if not rows:
-            await update.message.reply_text(
-                "📭 شما تا الان هیچ بارنامه‌ای ثبت نکرده‌اید.\n"
-                "برای شروع دکمه 🚀 آپلود مستندات را بزنید.",
-                reply_markup=driver_reply_keyboard()
-            )
-        else:
-            lines = []
-            for bn, data in rows[:20]:
-                doc_count = len(data.get("documents", {}))
-                status = review_status_label(data)
-                lines.append(f"{status} | `{bn}` | {doc_count}/{len(DOC_STEPS)} مستند | {data.get('created_at', '-')}")
-
-            text_msg = "📦 *وضعیت بارنامه‌های شما:*\n\n" + "\n".join(lines)
-            if len(rows) > 20:
-                text_msg += f"\n\n... و {len(rows)-20} بارنامه دیگر"
-
-            # اگه راننده در یک بارنامه‌ی رد شده گیر کرده، دکمه‌ی بارگذاری مجدد رو هم نشون بده
-            last_rejected = next((bn for bn, d in rows if d.get("review", {}).get("status") == "rejected"), None)
-            markup = None
-            if last_rejected:
-                token = make_barname_token(last_rejected)
-                markup = InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"🔄 بارگذاری مجدد {last_rejected}", callback_data=f"resubmit_{token}")]
-                ])
-
-            await update.message.reply_text(text_msg, parse_mode="Markdown", reply_markup=driver_reply_keyboard())
-            if markup:
-                await update.message.reply_text("برای بارگذاری مجدد مستندات رد شده 👇", reply_markup=markup)
-
-    elif text == "❌ لغو عملیات":
-        context.user_data.clear()
-        await update.message.reply_text(
-            "❌ عملیات لغو شد.\nهر زمان آماده بودید دوباره شروع کنید.",
-            reply_markup=driver_reply_keyboard()
-        )
-        return ConversationHandler.END
-
-    # ─── دکمه‌های ادمین ───
-    elif is_admin and text == "🔍 دریافت مستندات":
-        context.user_data["admin_action"] = "get_docs"
-        await update.message.reply_text(
-            "🔍 شماره بارنامه مورد نظر را وارد کنید:",
-            reply_markup=admin_reply_keyboard()
-        )
-
-    elif is_admin and text == "📊 لیست بارنامه‌ها":
-        db = load_db()
-        if not db:
-            await update.message.reply_text("📭 هیچ بارنامه‌ای ثبت نشده.", reply_markup=admin_reply_keyboard())
-            return
-        lines = []
-        for bn, data in sorted(db.items(), key=lambda x: x[1].get("created_at",""), reverse=True):
-            status = review_status_label(data)
-            lines.append(f"{status} | `{bn}` | {len(data.get('documents',{}))} مستند | {data.get('created_at','-')}")
-        text_msg = "📊 *لیست بارنامه‌ها:*\n\n" + "\n".join(lines[:20])
-        if len(db) > 20:
-            text_msg += f"\n\n... و {len(db)-20} بارنامه دیگر"
-        await update.message.reply_text(text_msg, parse_mode="Markdown", reply_markup=admin_reply_keyboard())
-
-    elif is_admin and text == "✅ بارنامه‌های تایید شده":
-        list_text, _ = build_approved_list_content()
-        await update.message.reply_text(list_text, parse_mode="Markdown", reply_markup=admin_reply_keyboard())
-
-    elif is_admin and text == "🕐 نیازمند بررسی":
-        list_text, list_markup = build_pending_list_content()
-        await update.message.reply_text(list_text, parse_mode="Markdown", reply_markup=list_markup)
-
-    elif is_admin and text == "📈 آمار کلی":
-        db = load_db()
-        total = len(db)
-        completed = sum(1 for d in db.values() if d.get("status") == "completed")
-        total_docs = sum(len(d.get("documents", {})) for d in db.values())
-        await update.message.reply_text(
-            f"📈 *آمار کلی پی‌بار*\n\n"
-            f"📦 کل بارنامه‌ها: *{total}*\n"
-            f"✅ تکمیل‌شده: *{completed}*\n"
-            f"⏳ در انتظار: *{total - completed}*\n"
-            f"📄 کل مستندات: *{total_docs}*",
-            parse_mode="Markdown",
-            reply_markup=admin_reply_keyboard()
-        )
-
-    elif is_admin and text == "🗑 حذف بارنامه":
-        context.user_data["admin_action"] = "delete_barname"
-        await update.message.reply_text(
-            "🗑 شماره بارنامه‌ای که می‌خواهید حذف کنید را وارد کنید:",
-            reply_markup=admin_reply_keyboard()
-        )
-
-    elif is_admin and text == "📎 افزودن عکس/فایل":
-        context.user_data["admin_action"] = "attach_barname"
-        context.user_data.pop("admin_attach_barname", None)
-        await update.message.reply_text(
-            "📎 شماره بارنامه‌ای که می‌خواهید بهش عکس یا فایل اضافه کنید را وارد کنید:",
-            reply_markup=admin_reply_keyboard()
-        )
-
-    elif is_admin and text == "🏠 منوی اصلی ادمین":
-        context.user_data.clear()
-        await update.message.reply_text(
-            "🔐 *پنل مدیریت پی‌بار*\nاز منوی پایین یا دکمه‌های زیر انتخاب کنید:",
-            parse_mode="Markdown",
-            reply_markup=admin_reply_keyboard()
-        )
-        await update.message.reply_text("👇", reply_markup=admin_keyboard())
-
-    return ConversationHandler.END
-
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data.clear()
-    await update.message.reply_text(
-        "❌ عملیات لغو شد.",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    # نمایش منوی اصلی بعد از لغو
-    user = update.effective_user
-    if user.id in ADMIN_IDS:
-        await update.message.reply_text(
-            "🔐 *پنل مدیریت پی‌بار*",
-            parse_mode="Markdown",
-            reply_markup=admin_keyboard()
-        )
-    else:
-        await update.message.reply_text(
-            "🏠 *منوی اصلی*\nبرای شروع مجدد دکمه زیر را بزنید:",
-            parse_mode="Markdown",
-            reply_markup=main_menu_keyboard()
-        )
-    return ConversationHandler.END
-
-
-# ─────────── راه‌اندازی ───────────
-
-# ─────────── داشبورد وب ادمین (FastAPI) ───────────
-
-dashboard_api = FastAPI(title="داشبورد پی‌بار")
-
-
-def _check_dashboard_token(token: str):
-    if not DASHBOARD_TOKEN:
-        raise HTTPException(status_code=503, detail="DASHBOARD_TOKEN روی سرور تنظیم نشده است.")
-    if not token or token != DASHBOARD_TOKEN:
-        raise HTTPException(status_code=401, detail="توکن نامعتبر است.")
-
-
-@dashboard_api.get("/", response_class=HTMLResponse)
-async def dashboard_index():
-    html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.html")
-    try:
-        with open(html_path, encoding="utf-8") as f:
-            return HTMLResponse(f.read())
-    except FileNotFoundError:
-        return HTMLResponse("<h3>فایل dashboard.html پیدا نشد.</h3>", status_code=500)
-
-
-@dashboard_api.get("/api/barnames")
-async def api_list_barnames(
-    x_dashboard_token: str = Header(default=""),
-    status: str = Query(default="all"),
-    search: str = Query(default=""),
-):
-    _check_dashboard_token(x_dashboard_token)
-    db = load_db()
-    rows = []
-    for bn, data in db.items():
-        if search and search.strip() not in bn:
-            continue
-        review = data.get("review", {})
-        st = review.get("status") or "none"
-        if status != "all" and st != status:
-            continue
-        rows.append({
-            "barname": bn,
-            "driver_name": data.get("driver_name", "-"),
-            "driver_id": data.get("driver_id"),
-            "status": st,
-            "status_label": review_status_label(data),
-            "doc_count": len(data.get("documents", {})),
-            "created_at": data.get("created_at", "-"),
-            "reviewed_at": review.get("reviewed_at"),
-        })
-    rows.sort(key=lambda r: r["created_at"] or "", reverse=True)
-    return rows
-
-
-@dashboard_api.get("/api/barnames/{barname}")
-async def api_get_barname(barname: str, x_dashboard_token: str = Header(default="")):
-    _check_dashboard_token(x_dashboard_token)
-    data = get_barname_data(barname)
-    if not data.get("documents"):
-        raise HTTPException(status_code=404, detail="بارنامه یافت نشد یا مستندی ندارد.")
-
-    docs = []
-    for key, info in data.get("documents", {}).items():
-        docs.append({
-            "key": key,
-            "label": DOC_NAMES.get(key, key),
-            "file_type": info.get("file_type"),
-            "text": info.get("text", ""),
-            "uploaded_at": info.get("uploaded_at", ""),
-        })
-
-    return {
-        "barname": barname,
-        "driver_name": data.get("driver_name", "-"),
-        "driver_id": data.get("driver_id"),
-        "created_at": data.get("created_at"),
-        "completed_at": data.get("completed_at"),
-        "review": data.get("review", {}),
-        "status_label": review_status_label(data),
-        "documents": docs,
-        "admin_attachments": data.get("admin_attachments", []),
-        "log": data.get("log", []),
-    }
-
-
-@dashboard_api.get("/api/barnames/{barname}/log")
-async def api_get_barname_log(barname: str, x_dashboard_token: str = Header(default="")):
-    """تاریخچه‌ی کامل تغییرات یک بارنامه (برای نمایش لاگ در داشبورد)"""
-    _check_dashboard_token(x_dashboard_token)
-    data = get_barname_data(barname)
-    if not data.get("created_at"):
-        raise HTTPException(status_code=404, detail="بارنامه یافت نشد.")
-    log = data.get("log", [])
-    # جدیدترین رویداد اول نمایش داده شود
-    log_sorted = list(reversed(log))
-    return {"barname": barname, "count": len(log_sorted), "log": log_sorted}
-
-
-@dashboard_api.get("/api/barnames/{barname}/doc/{doc_key}/file")
-async def api_get_doc_file(barname: str, doc_key: str, token: str = Query(default="")):
-    _check_dashboard_token(token)
-    data = get_barname_data(barname)
-    doc = data.get("documents", {}).get(doc_key)
-    if not doc or not doc.get("file_id"):
-        raise HTTPException(status_code=404, detail="فایل یافت نشد.")
-    if not BOT_INSTANCE:
-        raise HTTPException(status_code=503, detail="ربات هنوز آماده نیست.")
-    try:
-        tg_file = await BOT_INSTANCE.get_file(doc["file_id"])
-        file_bytes = await tg_file.download_as_bytearray()
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"خطا در دریافت فایل از بله: {e}")
-    media_type = "image/jpeg" if doc.get("file_type") == "photo" else "application/octet-stream"
-    return StreamingResponse(io.BytesIO(bytes(file_bytes)), media_type=media_type)
-
-
-@dashboard_api.get("/api/barnames/{barname}/attachment/{attachment_id}/file")
-async def api_get_attachment_file(barname: str, attachment_id: str, token: str = Query(default="")):
-    _check_dashboard_token(token)
-    data = get_barname_data(barname)
-    att = next((a for a in data.get("admin_attachments", []) if a.get("id") == attachment_id), None)
-    if not att:
-        raise HTTPException(status_code=404, detail="پیوست یافت نشد.")
-
-    media_type = "image/jpeg" if att.get("file_type") == "photo" else "application/octet-stream"
-
-    if att.get("source") == "dashboard":
-        file_path = os.path.join(DATA_DIR, "attachments", barname, att.get("filename", ""))
-        if not os.path.isfile(file_path):
-            raise HTTPException(status_code=404, detail="فایل روی سرور پیدا نشد.")
-        with open(file_path, "rb") as f:
-            file_bytes = f.read()
-        return StreamingResponse(io.BytesIO(file_bytes), media_type=media_type)
-
-    # source == "bot" — از طریق فایل‌سرور بله دانلود می‌شود
-    if not att.get("file_id"):
-        raise HTTPException(status_code=404, detail="فایل یافت نشد.")
-    if not BOT_INSTANCE:
-        raise HTTPException(status_code=503, detail="ربات هنوز آماده نیست.")
-    try:
-        tg_file = await BOT_INSTANCE.get_file(att["file_id"])
-        file_bytes = await tg_file.download_as_bytearray()
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"خطا در دریافت فایل از بله: {e}")
-    return StreamingResponse(io.BytesIO(bytes(file_bytes)), media_type=media_type)
-
-
-@dashboard_api.post("/api/barnames/{barname}/attachment")
-async def api_upload_attachment(
-    barname: str,
-    x_dashboard_token: str = Header(default=""),
-    file: UploadFile = File(...),
-    caption: str = Form(default=""),
-):
-    """آپلود مستقیم عکس/فایل برای یک بارنامه از داخل داشبورد (بدون نیاز به چت با ربات)"""
-    _check_dashboard_token(x_dashboard_token)
-    data = get_barname_data(barname)
-    if not data.get("created_at"):
-        raise HTTPException(status_code=404, detail="بارنامه یافت نشد.")
-
-    raw = await file.read()
-    if not raw:
-        raise HTTPException(status_code=400, detail="فایل خالی است.")
-    if len(raw) > 20 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="حجم فایل نباید بیشتر از ۲۰ مگابایت باشد.")
-
-    content_type = (file.content_type or "").lower()
-    file_type = "photo" if content_type.startswith("image/") else "document"
-
-    att_id = uuid.uuid4().hex[:10]
-    ext = os.path.splitext(file.filename or "")[1][:10]
-    stored_name = f"{att_id}{ext}"
-    dir_path = os.path.join(DATA_DIR, "attachments", barname)
-    os.makedirs(dir_path, exist_ok=True)
-    with open(os.path.join(dir_path, stored_name), "wb") as f:
-        f.write(raw)
-
-    attachments = data.setdefault("admin_attachments", [])
-    attachments.append({
-        "id": att_id,
-        "source": "dashboard",
-        "filename": stored_name,
-        "file_type": file_type,
-        "caption": (caption or "").strip(),
-        "uploaded_by": "ادمین (از طریق داشبورد وب)",
-        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-    })
-    add_barname_log(
-        data, "افزودن عکس/فایل توسط ادمین",
-        actor="ادمین (از طریق داشبورد وب)", detail=(caption or "").strip()
-    )
-    save_barname_data(barname, data)
-    return {"ok": True, "id": att_id}
-
-
-@dashboard_api.post("/api/barnames/{barname}/approve")
-async def api_approve(barname: str, x_dashboard_token: str = Header(default="")):
-    _check_dashboard_token(x_dashboard_token)
-    data = get_barname_data(barname)
-    review = data.get("review", {})
-    was_partial = review.get("status") == "partial"
-    if review.get("status") not in ("pending", "partial"):
-        raise HTTPException(status_code=400, detail="این بارنامه در وضعیتی نیست که بتوان تایید نهایی کرد.")
-
-    review["status"] = "approved"
-    review["reviewed_by"] = "dashboard"
-    review["reviewed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    data["review"] = review
-    if was_partial:
-        resp = review.get("driver_response")
-        resp_label = "پذیرفته بود" if resp == "accepted" else ("نپذیرفته بود" if resp == "rejected" else "هنوز پاسخی نداده بود")
-        add_barname_log(
-            data, "تایید نهایی بارنامه (پس از کسری بار)",
-            actor="ادمین (از طریق داشبورد وب)", detail=f"راننده کسری بار را {resp_label}"
-        )
-    else:
-        add_barname_log(data, "تایید مستندات", actor="ادمین (از طریق داشبورد وب)")
-    save_barname_data(barname, data)
-
-    driver_id = data.get("driver_id")
-    if driver_id and BOT_INSTANCE:
-        try:
-            msg_text = (
-                f"✅ راننده محترم بارنامه شماره {barname} شما به‌صورت نهایی تایید شد "
-                "و ظرف ۲ روز کاری هزینه بارنامه (با احتساب کسری بار توافق‌شده) به شماره حساب اعلامی شما واریز خواهد شد."
-            ) if was_partial else (
-                f"✅ راننده محترم مستندات ارسالی بارنامه شماره {barname} شما تایید شد "
-                "و ظرف ۲ روز کاری هزینه بارنامه به شماره حساب اعلامی شما واریز خواهد شد."
-            )
-            await BOT_INSTANCE.send_message(chat_id=driver_id, text=msg_text, reply_markup=driver_reply_keyboard())
-        except Exception as e:
-            logger.error(f"خطا در اطلاع‌رسانی به راننده از داشبورد: {e}")
-
-    fake_ctx = SimpleNamespace(bot=BOT_INSTANCE)
-    if was_partial:
-        finalize_messages = data.get("review", {}).get("finalize_messages", {})
-        for admin_id_str, msg_id in finalize_messages.items():
-            try:
-                await BOT_INSTANCE.edit_message_reply_markup(chat_id=int(admin_id_str), message_id=msg_id, reply_markup=None)
-            except Exception as e:
-                logger.error(f"خطا در حذف دکمه تایید نهایی ادمین {admin_id_str}: {e}")
-        await _finalize_review(fake_ctx, barname, data, "✅ تایید نهایی شد (پس از کسری بار — از طریق داشبورد وب)")
-    else:
-        await _finalize_review(fake_ctx, barname, data, "✅ تأیید شد (از طریق داشبورد وب)")
-    return {"ok": True}
-
-
-@dashboard_api.post("/api/barnames/{barname}/reject")
-async def api_reject(barname: str, payload: dict = Body(...), x_dashboard_token: str = Header(default="")):
-    _check_dashboard_token(x_dashboard_token)
-    reason = (payload.get("reason") or "").strip()
-    if not reason:
-        raise HTTPException(status_code=400, detail="علت عدم تایید الزامی است.")
-
-    data = get_barname_data(barname)
-    review = data.get("review", {})
-    if review.get("status") != "pending":
-        raise HTTPException(status_code=400, detail="این بارنامه در وضعیت «در انتظار بررسی» نیست.")
-
-    review["status"] = "rejected"
-    review["reason"] = reason
-    review["reviewed_by"] = "dashboard"
-    review["reviewed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    data["review"] = review
-    add_barname_log(data, "عدم تایید مستندات", actor="ادمین (از طریق داشبورد وب)", detail=reason)
-    save_barname_data(barname, data)
-
-    driver_id = data.get("driver_id")
-    if driver_id and BOT_INSTANCE:
-        try:
-            resubmit_token = make_barname_token(barname)
-            await BOT_INSTANCE.send_message(
-                chat_id=driver_id,
-                text=(
-                    f"❌ راننده محترم مستندات ارسالی مربوط به بارنامه شماره {barname} "
-                    f"به دلیل «{reason}» مورد تایید قرار نگرفت، "
-                    "لطفا مجددا مستندات را به صورت واضح و کامل ارسال نمایید."
-                ),
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 بارگذاری مجدد مستندات", callback_data=f"resubmit_{resubmit_token}")]
-                ])
-            )
-            await BOT_INSTANCE.send_message(
-                chat_id=driver_id,
-                text="👇 همچنین می‌توانید از منوی پایین صفحه استفاده کنید.",
-                reply_markup=driver_reply_keyboard()
-            )
-        except Exception as e:
-            logger.error(f"خطا در اطلاع‌رسانی به راننده از داشبورد: {e}")
-
-    fake_ctx = SimpleNamespace(bot=BOT_INSTANCE)
-    await _finalize_review(fake_ctx, barname, data, f"❌ عدم تأیید (علت: {reason}) — از طریق داشبورد وب")
-    return {"ok": True}
-
-
-@dashboard_api.post("/api/barnames/{barname}/partial")
-async def api_partial(barname: str, payload: dict = Body(...), x_dashboard_token: str = Header(default="")):
-    _check_dashboard_token(x_dashboard_token)
-    note = (payload.get("note") or "").strip()
-    if not note:
-        raise HTTPException(status_code=400, detail="مقدار کسری بار الزامی است.")
-
-    data = get_barname_data(barname)
-    review = data.get("review", {})
-    if review.get("status") != "pending":
-        raise HTTPException(status_code=400, detail="این بارنامه در وضعیت «در انتظار بررسی» نیست.")
-
-    rid = review.get("id", "")
-    review["status"] = "partial"
-    review["deduction_note"] = note
-    review["driver_response"] = None
-    review["reviewed_by"] = "dashboard"
-    review["reviewed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    data["review"] = review
-    add_barname_log(data, "تایید با کسری بار", actor="ادمین (از طریق داشبورد وب)", detail=note)
-    save_barname_data(barname, data)
-
-    driver_id = data.get("driver_id")
-    if driver_id and BOT_INSTANCE:
-        try:
-            await BOT_INSTANCE.send_message(
-                chat_id=driver_id,
-                text=(
-                    f"⚠️ راننده محترم طبق بررسی حواله و رسید ارسالی مقدار {note} "
-                    "کسری بار دارید که هزینه آن می‌بایست از مبلغ بارنامه کسر شود.\n\n"
-                    "آیا این کسری بار مورد تایید شماست؟"
-                ),
-                reply_markup=driver_partial_response_keyboard(rid)
-            )
-            await BOT_INSTANCE.send_message(
-                chat_id=driver_id,
-                text="👇 همچنین می‌توانید از منوی پایین صفحه استفاده کنید.",
-                reply_markup=driver_reply_keyboard()
-            )
-        except Exception as e:
-            logger.error(f"خطا در اطلاع‌رسانی به راننده از داشبورد: {e}")
-
-    fake_ctx = SimpleNamespace(bot=BOT_INSTANCE)
-    await _finalize_review(
-        fake_ctx, barname, data,
-        f"⚠️ تأیید با کسری بار ({note}) — از طریق داشبورد وب — در انتظار پاسخ راننده"
-    )
-    return {"ok": True}
-
-
-@dashboard_api.post("/api/barnames/{barname}/message")
-async def api_custom_message(barname: str, payload: dict = Body(...), x_dashboard_token: str = Header(default="")):
-    _check_dashboard_token(x_dashboard_token)
-    text = (payload.get("text") or "").strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="متن پیام الزامی است.")
-
-    data = get_barname_data(barname)
-    driver_id = data.get("driver_id")
-    if not driver_id:
-        raise HTTPException(status_code=404, detail="راننده‌ای برای این بارنامه یافت نشد.")
-    if not BOT_INSTANCE:
-        raise HTTPException(status_code=503, detail="ربات هنوز آماده نیست.")
-
-    try:
-        await BOT_INSTANCE.send_message(chat_id=driver_id, text=text)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"خطا در ارسال پیام: {e}")
-
-    add_barname_log(data, "پیام دستی به راننده", actor="ادمین (از طریق داشبورد وب)", detail=text)
-    save_barname_data(barname, data)
-
-    return {"ok": True}
-
-
-async def _on_startup(application):
-    """قبل از شروع polling، هر webhook فعال روی این ربات را حذف می‌کند تا هرگز polling و webhook هم‌زمان فعال نباشند
-    (فعال بودن هم‌زمان هر دو، دلیل رایج ارسال دوبار هر پیام است)."""
-    try:
-        info = await application.bot.get_webhook_info()
-        if info and info.url:
-            logger.warning(f"⚠️ یک webhook فعال روی این ربات پیدا شد ({info.url}) — در حال حذف آن تا فقط polling فعال باشد...")
-        deleted = await application.bot.delete_webhook(drop_pending_updates=True)
-        logger.info(f"✅ بررسی/حذف webhook انجام شد (نتیجه: {deleted}).")
-    except Exception as e:
-        logger.error(f"⚠️ خطا در بررسی/حذف webhook: {e}")
-
-
-async def run_app():
-    global BOT_INSTANCE
-
-    # شناسه‌ی یکتای این نمونه از پروسه — اگر در لاگ‌ها دو INSTANCE_ID متفاوت هم‌زمان دیدید،
-    # یعنی دو نسخه از ربات هم‌زمان در حال اجرا هستند و همین باعث ارسال دوبار هر پیام می‌شود.
-    instance_id = uuid.uuid4().hex[:8]
-    logger.info(f"🆔 INSTANCE_ID این اجرا: {instance_id} — اگر جای دیگری هم‌زمان یک INSTANCE_ID دیگر دیدید، دو نمونه از ربات هم‌زمان اجرا شده‌اند.")
-
-    # تشخیص مشکلات رایج پیکربندی قبل از شروع
-    if not ADMIN_IDS:
-        logger.warning("⚠️ متغیر ADMIN_IDS خالی است — هیچ ادمینی به پنل مدیریت دسترسی نخواهد داشت!")
-    else:
-        logger.info(f"✅ آیدی ادمین‌های تعریف‌شده: {ADMIN_IDS}")
-
-    if not DASHBOARD_TOKEN:
-        logger.warning("⚠️ متغیر DASHBOARD_TOKEN تنظیم نشده — داشبورد وب غیرفعال خواهد بود (همه‌ی درخواست‌ها 503 می‌گیرند).")
-
-    if os.path.exists(DB_FILE):
-        try:
-            existing = load_db()
-            logger.info(f"📦 دیتابیس موجود بارگذاری شد از «{DB_FILE}» — {len(existing)} بارنامه ثبت‌شده.")
-        except Exception as e:
-            logger.error(f"⚠️ خطا در خواندن دیتابیس موجود: {e}")
-    else:
-        logger.warning(
-            f"⚠️ فایل دیتابیس («{DB_FILE}») پیدا نشد — یک دیتابیس خالی جدید ساخته می‌شود. "
-            "اگر این پیام را بعد از هر ری‌استارت می‌بینید، یعنی فضای ذخیره‌سازی سرور شما پایدار (persistent) نیست "
-            "و تمام بارنامه‌ها/تاریخچه‌ها با هر دیپلوی یا ری‌استارت پاک می‌شوند — "
-            "برای رفع این مشکل باید یک Volume دائمی در Railway بسازی و متغیر DATA_DIR را به مسیر Mount آن تنظیم کنی."
-        )
-
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .base_url(BALE_API_BASE_URL)
-        .base_file_url(BALE_API_FILE_URL)
-        .post_init(_on_startup)
-        .build()
-    )
-    BOT_INSTANCE = app.bot
-
-    conv_handler = ConversationHandler(
-        entry_points=[
-            CommandHandler("start", start),
-            CallbackQueryHandler(handle_start_upload, pattern="^start_upload$"),
-            CallbackQueryHandler(resubmit_barname, pattern="^resubmit_"),
-            MessageHandler(filters.Regex("^🚀 آپلود مستندات$"), handle_start_upload_button),
-        ],
-        states={
-            WAIT_BARNAME: [
-                MessageHandler(filters.Regex("^(🚀 آپلود مستندات|📋 راهنما|📦 وضعیت بارنامه|❌ لغو عملیات|🔍 دریافت مستندات|📊 لیست بارنامه‌ها|📈 آمار کلی|🗑 حذف بارنامه|✅ بارنامه‌های تایید شده|🕐 نیازمند بررسی|🏠 منوی اصلی ادمین)$"), reply_keyboard_handler),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_barname),
-                CallbackQueryHandler(back_to_main, pattern="^back_to_main$"),
-            ],
-            WAIT_PHOTO: [
-                MessageHandler(filters.Regex("^(🚀 آپلود مستندات|📋 راهنما|📦 وضعیت بارنامه|❌ لغو عملیات|🔍 دریافت مستندات|📊 لیست بارنامه‌ها|📈 آمار کلی|🗑 حذف بارنامه|✅ بارنامه‌های تایید شده|🕐 نیازمند بررسی|🏠 منوی اصلی ادمین)$"), reply_keyboard_handler),
-                MessageHandler(filters.PHOTO | filters.Document.ALL, receive_photo),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_photo),
-                CallbackQueryHandler(skip_step, pattern="^skip_step$"),
-                CallbackQueryHandler(finish_early, pattern="^finish_early$"),
-                CallbackQueryHandler(go_prev_step, pattern="^go_prev_step$"),
-                CallbackQueryHandler(go_back_to_step, pattern="^go_back_to_step$"),
-                CallbackQueryHandler(back_to_main, pattern="^back_to_main$"),
-                CallbackQueryHandler(edit_specific_doc, pattern="^edit_doc_"),
-            ],
-            WAIT_CONFIRM: [
-                MessageHandler(filters.Regex("^(🚀 آپلود مستندات|📋 راهنما|📦 وضعیت بارنامه|❌ لغو عملیات|🔍 دریافت مستندات|📊 لیست بارنامه‌ها|📈 آمار کلی|🗑 حذف بارنامه|✅ بارنامه‌های تایید شده|🕐 نیازمند بررسی|🏠 منوی اصلی ادمین)$"), reply_keyboard_handler),
-                CallbackQueryHandler(confirm_photo, pattern="^confirm_photo$"),
-                CallbackQueryHandler(retake_photo, pattern="^retake_photo$"),
-                CallbackQueryHandler(finish_early, pattern="^finish_early$"),
-                CallbackQueryHandler(go_prev_step, pattern="^go_prev_step$"),
-                CallbackQueryHandler(final_confirm, pattern="^final_confirm$"),
-                CallbackQueryHandler(edit_docs, pattern="^edit_docs$"),
-                CallbackQueryHandler(edit_specific_doc, pattern="^edit_doc_"),
-                CallbackQueryHandler(back_to_summary, pattern="^back_to_summary$"),
-                CallbackQueryHandler(back_to_main, pattern="^back_to_main$"),
-            ],
-        },
-        fallbacks=[
-            CommandHandler("cancel", cancel),
-            CallbackQueryHandler(back_to_main, pattern="^back_to_main$"),
-            MessageHandler(filters.Regex("^❌ لغو عملیات$"), cancel),
-        ],
-        allow_reentry=True,
-    )
-
-    # محافظ ضد آپدیت تکراری — باید زودتر از همه‌ی هندلرهای دیگر اجرا شود (group=-1)
-    app.add_handler(TypeHandler(Update, dedupe_update_guard), group=-1)
-
-    app.add_handler(conv_handler)
-
-    # هندلرهای خارج از conversation (ادمین + منو)
-    app.add_handler(CallbackQueryHandler(handle_start_upload, pattern="^start_upload$"))
-    app.add_handler(CallbackQueryHandler(handle_show_help, pattern="^show_help$"))
-    app.add_handler(CallbackQueryHandler(admin_get_docs, pattern="^admin_get$"))
-    app.add_handler(CallbackQueryHandler(admin_list_barnames, pattern="^admin_list$"))
-    app.add_handler(CallbackQueryHandler(admin_delete_barname, pattern="^admin_delete$"))
-    app.add_handler(CallbackQueryHandler(admin_attach_start, pattern="^admin_attach$"))
-    app.add_handler(CallbackQueryHandler(admin_stats, pattern="^admin_stats$"))
-    app.add_handler(CallbackQueryHandler(admin_approved_list, pattern="^admin_approved_list$"))
-    app.add_handler(CallbackQueryHandler(admin_pending_list, pattern="^admin_pending_list$"))
-    app.add_handler(CallbackQueryHandler(admin_pending_page, pattern="^admin_pending_page_"))
-    app.add_handler(CallbackQueryHandler(admin_open_barname, pattern="^admin_open_"))
-    app.add_handler(CallbackQueryHandler(admin_back, pattern="^admin_back$"))
-    app.add_handler(CallbackQueryHandler(back_to_main, pattern="^back_to_main$"))
-    # هندلرهای بررسی مستندات توسط ادمین (تایید / عدم تایید / تایید با کسری بار)
-    app.add_handler(CallbackQueryHandler(review_approve, pattern="^radm_appr_"))
-    app.add_handler(CallbackQueryHandler(review_reject_start, pattern="^radm_rej_"))
-    app.add_handler(CallbackQueryHandler(review_partial_start, pattern="^radm_part_"))
-    app.add_handler(CallbackQueryHandler(review_finalize, pattern="^radm_fin_"))
-    app.add_handler(CallbackQueryHandler(driver_partial_accept, pattern="^drv_ok_"))
-    app.add_handler(CallbackQueryHandler(driver_partial_reject_start, pattern="^drv_no_"))
-    # افزودن عکس/فایل توسط ادمین به یک بارنامه (خارج از فلوی مکالمه‌ی راننده)
-    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, admin_attach_receive_file))
-    # هندلر دکمه‌های منوی Reply (باید قبل از admin_text_handler باشه)
-    reply_kb_filter = filters.Regex("^(🚀 آپلود مستندات|📋 راهنما|📦 وضعیت بارنامه|❌ لغو عملیات|🔍 دریافت مستندات|📊 لیست بارنامه‌ها|📈 آمار کلی|🗑 حذف بارنامه|📎 افزودن عکس/فایل|✅ بارنامه‌های تایید شده|🕐 نیازمند بررسی|🏠 منوی اصلی ادمین)$")
-    app.add_handler(MessageHandler(reply_kb_filter, reply_keyboard_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler))
-
-    logger.info("🤖 ربات پی‌بار v3 شروع به کار کرد...")
-
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-
-    logger.info(f"🌐 داشبورد ادمین روی پورت {PORT} در حال اجراست (مسیر: /).")
-    uvicorn_config = uvicorn.Config(dashboard_api, host="0.0.0.0", port=PORT, log_level="warning")
-    uvicorn_server = uvicorn.Server(uvicorn_config)
-
-    try:
-        await uvicorn_server.serve()
-    finally:
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
-
-
-def main():
-    asyncio.run(run_app())
-
-
-if __name__ == "__main__":
-    main()
+    return `<div class="doc-card">${inner}<div class="doc-label">${d.label}</div></div>`;
+  }).join('');
+
+  let actionsHtml = '';
+  if (status === 'pending') {
+    actionsHtml = `
+      <div class="action-row">
+        <button class="btn-green" onclick="doApprove()">✅ تایید</button>
+        <button class="btn-red" onclick="toggleForm('rejectForm')">❌ عدم تایید</button>
+        <button class="btn-orange" onclick="toggleForm('partialForm')">⚠️ تایید با کسری بار</button>
+      </div>
+      <div class="subform" id="rejectForm">
+        <textarea id="rejectReason" placeholder="علت عدم تایید را بنویسید..."></textarea>
+        <button class="btn-red" onclick="doReject()">ارسال عدم تایید</button>
+      </div>
+      <div class="subform" id="partialForm">
+        <textarea id="partialNote" placeholder="مقدار کسری بار را بنویسید (مثلاً: ۲ تن)..."></textarea>
+        <button class="btn-orange" onclick="doPartial()">ارسال تایید با کسری بار</button>
+      </div>
+    `;
+  } else {
+    actionsHtml = `<p class="info-line">این بارنامه قبلاً بررسی شده و دیگر قابل تغییر از این بخش نیست.</p>`;
+    if (review.reason) actionsHtml += `<p class="info-line"><b>علت رد:</b> ${escapeHtml(review.reason)}</p>`;
+    if (review.deduction_note) actionsHtml += `<p class="info-line"><b>مقدار کسری:</b> ${escapeHtml(review.deduction_note)}</p>`;
+  }
+
+  const logItems = (data.log || []).slice().reverse();
+  const logHtml = logItems.length
+    ? `<div class="timeline">${logItems.map(logItemHtml).join('')}</div>`
+    : `<p class="no-log">هنوز رویدادی برای این بارنامه ثبت نشده.</p>`;
+
+  document.getElementById('detailContent').innerHTML = `
+    <h2>📦 بارنامه ${data.barname} <span class="badge ${BADGE_CLASS[status] || 'badge-none'}">${data.status_label}</span></h2>
+    <div class="info-line">👤 راننده: <b>${data.driver_name || '-'}</b> (آیدی: ${data.driver_id || '-'})</div>
+    <div class="info-line">🕐 تاریخ ثبت: ${data.created_at || '-'}</div>
+    ${data.completed_at ? `<div class="info-line">📤 تاریخ ارسال نهایی: ${data.completed_at}</div>` : ''}
+    <div class="doc-grid">${docsHtml || '<p class="info-line">مستندی یافت نشد</p>'}</div>
+    ${actionsHtml}
+    <div class="msgbox">
+      <div class="info-line" style="margin-bottom:6px;">✉️ ارسال پیام آزاد به راننده</div>
+      <textarea id="freeMessage" placeholder="متن پیام..."></textarea>
+      <button class="btn-primary" onclick="sendFreeMessage()">ارسال پیام</button>
+    </div>
+    <div class="section-title">📜 تاریخچه بارنامه</div>
+    ${logHtml}
+  `;
+}
+
+function eventClass(ev) {
+  ev = ev || '';
+  if (ev.includes('تایید با کسری')) return 'ev-partial';
+  if (ev.includes('عدم تایید') || ev.includes('عدم پذیرش')) return 'ev-rejected';
+  if (ev.includes('تایید') || ev.includes('پذیرش')) return 'ev-approved';
+  if (ev.includes('راننده')) return 'ev-driver';
+  return '';
+}
+
+function logItemHtml(item) {
+  return `
+    <div class="tl-item ${eventClass(item.event)}">
+      <div class="tl-dot"></div>
+      <div class="tl-card">
+        <div class="tl-time">${escapeHtml(item.time || '')}</div>
+        <div class="tl-event">${escapeHtml(item.event || '')}</div>
+        ${item.actor ? `<div class="tl-actor">${escapeHtml(item.actor)}</div>` : ''}
+        ${item.detail ? `<div class="tl-detail">${escapeHtml(item.detail)}</div>` : ''}
+      </div>
+    </div>`;
+}
+
+function toggleForm(id) {
+  document.querySelectorAll('.subform').forEach(el => el.classList.remove('open'));
+  document.getElementById(id).classList.add('open');
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+async function doApprove() {
+  if (!confirm('تایید این بارنامه ثبت شود؟')) return;
+  try {
+    await apiFetch(`/api/barnames/${encodeURIComponent(currentBarname)}/approve`, { method: 'POST' });
+    toast('تایید شد و به راننده اطلاع داده شد', true);
+    closeDetail(); loadList();
+  } catch (e) { toast(e.message, false); }
+}
+
+async function doReject() {
+  const reason = document.getElementById('rejectReason').value.trim();
+  if (!reason) { toast('علت را بنویسید', false); return; }
+  try {
+    await apiFetch(`/api/barnames/${encodeURIComponent(currentBarname)}/reject`, {
+      method: 'POST', body: JSON.stringify({ reason })
+    });
+    toast('عدم تایید ثبت و به راننده اطلاع داده شد', true);
+    closeDetail(); loadList();
+  } catch (e) { toast(e.message, false); }
+}
+
+async function doPartial() {
+  const note = document.getElementById('partialNote').value.trim();
+  if (!note) { toast('مقدار کسری را بنویسید', false); return; }
+  try {
+    await apiFetch(`/api/barnames/${encodeURIComponent(currentBarname)}/partial`, {
+      method: 'POST', body: JSON.stringify({ note })
+    });
+    toast('تایید با کسری بار ثبت و به راننده اطلاع داده شد', true);
+    closeDetail(); loadList();
+  } catch (e) { toast(e.message, false); }
+}
+
+async function sendFreeMessage() {
+  const text = document.getElementById('freeMessage').value.trim();
+  if (!text) { toast('متن پیام را بنویسید', false); return; }
+  try {
+    await apiFetch(`/api/barnames/${encodeURIComponent(currentBarname)}/message`, {
+      method: 'POST', body: JSON.stringify({ text })
+    });
+    toast('پیام برای راننده ارسال شد', true);
+    document.getElementById('freeMessage').value = '';
+  } catch (e) { toast(e.message, false); }
+}
+
+if (TOKEN) checkAndEnter();
+</script>
+</body>
+</html>
