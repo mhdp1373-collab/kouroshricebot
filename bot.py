@@ -40,7 +40,7 @@ from telegram.ext import (
     ConversationHandler, filters, ContextTypes, TypeHandler, ApplicationHandlerStop
 )
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Header, Query, Body
+from fastapi import FastAPI, HTTPException, Header, Query, Body, UploadFile, File
 from fastapi.responses import HTMLResponse, StreamingResponse
 import uvicorn
 
@@ -235,7 +235,12 @@ def review_status_label(db_data: dict) -> str:
     if status == "rejected":
         return "❌ تایید نشده"
     if status == "partial":
-        return "⚠️ تایید با کسری بار"
+        driver_response = review.get("driver_response")
+        if driver_response == "accepted":
+            return "⚠️ کسری بار (پذیرفته شد — نیازمند تایید نهایی ادمین)"
+        if driver_response == "rejected":
+            return "⚠️ کسری بار (رد شد توسط راننده — نیازمند تایید نهایی ادمین)"
+        return "⚠️ کسری بار (در انتظار پاسخ راننده)"
     if status == "pending":
         return "🕐 در انتظار بررسی"
     return "⏳ ثبت نشده / ناقص"
@@ -266,6 +271,7 @@ def admin_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📊 لیست بارنامه‌ها", callback_data="admin_list")],
         [InlineKeyboardButton("✅ بارنامه‌های تایید شده (۵ روز اخیر)", callback_data="admin_approved_list")],
         [InlineKeyboardButton("🕐 نیازمند بررسی / تایید نشده", callback_data="admin_pending_list")],
+        [InlineKeyboardButton("📎 افزودن تصویر به بارنامه", callback_data="admin_attach_photo_start")],
         [InlineKeyboardButton("🗑 حذف بارنامه", callback_data="admin_delete")],
         [InlineKeyboardButton("📈 آمار کلی", callback_data="admin_stats")],
     ])
@@ -354,6 +360,16 @@ def driver_partial_response_keyboard(rid: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("✅ مورد تایید است", callback_data=f"drv_ok_{rid}")],
         [InlineKeyboardButton("❌ مورد تایید نیست", callback_data=f"drv_no_{rid}")],
     ])
+
+def partial_pending_admin_keyboard(rid: str, barname: str = "") -> InlineKeyboardMarkup:
+    """کیبورد ادمین بعد از ثبت «تایید با کسری بار» — تا وقتی ادمین تایید نهایی نزند، بارنامه تایید‌شده محسوب نمی‌شود"""
+    rows = [
+        [InlineKeyboardButton("✅ تایید نهایی بارنامه", callback_data=f"radm_finalpart_{rid}")],
+    ]
+    if barname:
+        token = make_barname_token(barname)
+        rows.append([InlineKeyboardButton(f"📦 نمایش مجدد مستندات {barname}", callback_data=f"admin_open_{token}")])
+    return InlineKeyboardMarkup(rows)
 
 def barname_entry_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -1050,18 +1066,18 @@ async def final_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 # ─────────── بررسی مستندات توسط ادمین ───────────
 
-async def _finalize_review(context, barname: str, db_data: dict, status_label: str):
-    """حذف دکمه‌های بررسی از پیام تمام ادمین‌ها و اطلاع‌رسانی تصمیم نهایی به آن‌ها"""
+async def _finalize_review(context, barname: str, db_data: dict, status_label: str, new_markup=None):
+    """به‌روزرسانی دکمه‌های پیام تمام ادمین‌ها (حذف یا جایگزینی) و اطلاع‌رسانی وضعیت جدید به آن‌ها"""
     admin_messages = db_data.get("review", {}).get("admin_messages", {})
     for admin_id_str, msg_id in admin_messages.items():
         try:
             await context.bot.edit_message_reply_markup(
                 chat_id=int(admin_id_str),
                 message_id=msg_id,
-                reply_markup=None
+                reply_markup=new_markup
             )
         except Exception as e:
-            logger.error(f"خطا در حذف دکمه‌های ادمین {admin_id_str}: {e}")
+            logger.error(f"خطا در به‌روزرسانی دکمه‌های ادمین {admin_id_str}: {e}")
         try:
             await context.bot.send_message(
                 chat_id=int(admin_id_str),
@@ -1110,6 +1126,47 @@ async def review_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"خطا در اطلاع‌رسانی به راننده: {e}")
 
     await _finalize_review(context, barname, db_data, f"✅ تأیید شد توسط {user.first_name}")
+
+
+async def admin_finalize_partial(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """تایید نهایی بارنامه بعد از «تایید با کسری بار» — صرف‌نظر از اینکه راننده پذیرفته یا مخالفت کرده"""
+    query = update.callback_query
+    user = query.from_user
+    if user.id not in ADMIN_IDS:
+        logger.warning(f"⛔️ تلاش دسترسی غیرمجاز به دکمه ادمین توسط آیدی {user.id} (لیست ادمین‌های مجاز: {ADMIN_IDS})")
+        await query.answer("⛔️ دسترسی ندارید.", show_alert=True)
+        return
+
+    rid = query.data.replace("radm_finalpart_", "")
+    barname, db_data = find_barname_by_review_id(rid)
+    if not barname or db_data.get("review", {}).get("status") != "partial":
+        logger.warning(f"⚠️ درخواست تایید نهایی نامعتبر — rid={rid} یافت‌نشد یا قبلاً نهایی شده")
+        await query.answer("⚠️ این درخواست دیگر معتبر نیست یا قبلاً نهایی شده.", show_alert=True)
+        return
+
+    await query.answer("✅ تأیید نهایی شد")
+
+    db_data["review"]["status"] = "approved"
+    db_data["review"]["reviewed_by"] = user.id
+    db_data["review"]["reviewed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    add_barname_log(db_data, "تایید نهایی بارنامه (پس از کسری بار)", actor=f"{user.first_name} (ادمین، از طریق ربات)")
+    save_barname_data(barname, db_data)
+
+    driver_id = db_data.get("driver_id")
+    if driver_id:
+        try:
+            await context.bot.send_message(
+                chat_id=driver_id,
+                text=(
+                    f"✅ راننده محترم مستندات ارسالی بارنامه شماره {barname} شما تایید شد "
+                    "و ظرف ۲ روز کاری هزینه بارنامه به شماره حساب اعلامی شما واریز خواهد شد."
+                ),
+                reply_markup=driver_reply_keyboard()
+            )
+        except Exception as e:
+            logger.error(f"خطا در اطلاع‌رسانی به راننده: {e}")
+
+    await _finalize_review(context, barname, db_data, f"✅ تأیید نهایی شد توسط {user.first_name}")
 
 
 async def review_reject_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1170,7 +1227,7 @@ async def review_partial_start(update: Update, context: ContextTypes.DEFAULT_TYP
 # ─────────── پاسخ راننده به تایید با کسری بار ───────────
 
 async def driver_partial_accept(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """راننده کسری بار را قبول می‌کند"""
+    """راننده کسری بار را قبول می‌کند — وضعیت هنوز نهایی نمی‌شود، منتظر تایید نهایی ادمین می‌ماند"""
     query = update.callback_query
     rid = query.data.replace("drv_ok_", "")
     barname, db_data = find_barname_by_review_id(rid)
@@ -1183,12 +1240,11 @@ async def driver_partial_accept(update: Update, context: ContextTypes.DEFAULT_TY
     await query.edit_message_reply_markup(reply_markup=None)
 
     db_data["review"]["driver_response"] = "accepted"
-    db_data["review"]["status"] = "approved"
     add_barname_log(db_data, "پذیرش کسری بار توسط راننده", actor=f"{query.from_user.full_name} (راننده)")
     save_barname_data(barname, db_data)
 
     await query.message.reply_text(
-        "✅ تایید شما ثبت شد. با تشکر از همکاری شما.",
+        "✅ پاسخ شما ثبت شد. پس از تایید نهایی ادمین، مبلغ بارنامه ظرف ۲ روز کاری واریز خواهد شد.",
         reply_markup=driver_reply_keyboard()
     )
 
@@ -1197,8 +1253,8 @@ async def driver_partial_accept(update: Update, context: ContextTypes.DEFAULT_TY
             await context.bot.send_message(
                 chat_id=admin_id,
                 text=(
-                    f"✅ بارنامه شماره {barname} با کسری بار مورد تایید راننده قرار گرفت.\n"
-                    "📌 وضعیت بارنامه به «تایید شده» تغییر یافت."
+                    f"✅ راننده کسری بار بارنامه شماره {barname} را پذیرفت.\n"
+                    "برای نهایی‌شدن، روی دکمه «✅ تایید نهایی بارنامه» در پیام مستندات همین بارنامه بزنید."
                 )
             )
         except Exception as e:
@@ -1267,6 +1323,20 @@ async def admin_delete_barname(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await query.edit_message_text(
         "🗑 *حذف بارنامه*\n\nشماره بارنامه‌ای که می‌خواهید حذف کنید را وارد کنید:",
+        parse_mode="Markdown",
+        reply_markup=admin_back_keyboard()
+    )
+
+
+async def admin_attach_photo_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """شروع فرایند افزودن تصویر دلخواه ادمین به یک بارنامه"""
+    query = update.callback_query
+    await query.answer()
+    context.user_data["admin_action"] = "attach_photo_barname"
+    context.user_data.pop("attach_photo_barname", None)
+
+    await query.edit_message_text(
+        "📎 *افزودن تصویر به بارنامه*\n\nشماره بارنامه‌ای که می‌خواهید برایش تصویر اضافه کنید را وارد کنید:",
         parse_mode="Markdown",
         reply_markup=admin_back_keyboard()
     )
@@ -1499,7 +1569,9 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         f"❌ راننده کسری بار بارنامه شماره {barname} را قبول ندارد.\n\n"
                         f"📝 علت: {note_text}\n"
                         f"👤 راننده: {driver_link}\n\n"
-                        "لطفاً جهت هماهنگی، مستقیماً با راننده ارتباط بگیرید."
+                        "لطفاً جهت هماهنگی، مستقیماً با راننده ارتباط بگیرید.\n"
+                        "دکمه «✅ تایید نهایی بارنامه» همچنان در پیام مستندات این بارنامه فعال است "
+                        "و هر زمان تصمیم نهایی گرفتید می‌توانید بزنید."
                     ),
                     parse_mode="Markdown"
                 )
@@ -1604,10 +1676,16 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
             await update.message.reply_text(
                 f"⚠️ تأیید با کسری بار برای بارنامه {barname} ثبت و به راننده اطلاع داده شد. "
-                "پاسخ راننده به‌زودی برای شما ارسال خواهد شد.",
+                "پاسخ راننده به‌زودی برای شما ارسال خواهد شد.\n\n"
+                "توجه: این بارنامه هنوز «تایید شده» نیست — بعد از بررسی پاسخ راننده، "
+                "برای نهایی‌کردن باید روی دکمه «✅ تایید نهایی بارنامه» در پیام مستندات بزنید.",
                 reply_markup=admin_keyboard()
             )
-            await _finalize_review(context, barname, db_data, f"⚠️ تأیید با کسری بار ({note_text}) — در انتظار پاسخ راننده")
+            await _finalize_review(
+                context, barname, db_data,
+                f"⚠️ تأیید با کسری بار ({note_text}) — در انتظار پاسخ راننده (برای نهایی‌کردن، دکمه «تایید نهایی» را بزنید)",
+                new_markup=partial_pending_admin_keyboard(rid, barname)
+            )
 
         context.user_data.pop("review_pending", None)
         return
@@ -1681,6 +1759,66 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=admin_keyboard()
         )
         context.user_data.pop("admin_action", None)
+
+    # ─── افزودن تصویر به بارنامه (مرحله ۱: دریافت شماره بارنامه) ───
+    if action == "attach_photo_barname":
+        db_data = get_barname_data(barname)
+        if not db_data.get("documents"):
+            await update.message.reply_text(
+                f"❌ بارنامه *{barname}* یافت نشد یا هنوز مستندی ندارد.",
+                parse_mode="Markdown",
+                reply_markup=admin_keyboard()
+            )
+            context.user_data.pop("admin_action", None)
+            return
+
+        context.user_data["attach_photo_barname"] = barname
+        context.user_data["admin_action"] = "attach_photo_file"
+        await update.message.reply_text(
+            f"📎 حالا تصویر مورد نظر برای بارنامه *{barname}* را ارسال کنید:",
+            parse_mode="Markdown"
+        )
+
+
+async def admin_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """دریافت تصویری که ادمین برای افزودن به یک بارنامه ارسال کرده"""
+    user = update.effective_user
+    if user.id not in ADMIN_IDS:
+        return
+    if context.user_data.get("admin_action") != "attach_photo_file":
+        return
+
+    barname = context.user_data.get("attach_photo_barname")
+    if not barname:
+        context.user_data.pop("admin_action", None)
+        return
+
+    photo = update.message.photo[-1] if update.message.photo else None
+    doc = update.message.document
+    if not photo and not doc:
+        await update.message.reply_text("⚠️ لطفاً یک عکس ارسال کنید.")
+        return
+
+    file_id = photo.file_id if photo else doc.file_id
+    file_type = "photo" if photo else "document"
+
+    db_data = get_barname_data(barname)
+    attachments = db_data.setdefault("admin_attachments", [])
+    attachments.append({
+        "file_id": file_id,
+        "file_type": file_type,
+        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "uploaded_by": f"{user.first_name} (ادمین)",
+    })
+    add_barname_log(db_data, "افزودن تصویر توسط ادمین", actor=f"{user.first_name} (ادمین)")
+    save_barname_data(barname, db_data)
+
+    await update.message.reply_text(
+        f"✅ تصویر برای بارنامه *{barname}* ذخیره شد و در داشبورد هم قابل مشاهده است.\n\n"
+        "اگر تصویر دیگری هم دارید همین الان بفرستید، یا برای پایان روی «🏠 منوی اصلی ادمین» بزنید.",
+        parse_mode="Markdown"
+    )
+    # عمداً وضعیت را پاک نمی‌کنیم تا ادمین بتواند چند تصویر پشت‌سرهم بفرستد
 
 
 async def reply_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1915,6 +2053,15 @@ async def api_get_barname(barname: str, x_dashboard_token: str = Header(default=
             "uploaded_at": info.get("uploaded_at", ""),
         })
 
+    attachments = []
+    for idx, att in enumerate(data.get("admin_attachments", [])):
+        attachments.append({
+            "index": idx,
+            "file_type": att.get("file_type"),
+            "uploaded_at": att.get("uploaded_at", ""),
+            "uploaded_by": att.get("uploaded_by", ""),
+        })
+
     return {
         "barname": barname,
         "driver_name": data.get("driver_name", "-"),
@@ -1924,6 +2071,7 @@ async def api_get_barname(barname: str, x_dashboard_token: str = Header(default=
         "review": data.get("review", {}),
         "status_label": review_status_label(data),
         "documents": docs,
+        "attachments": attachments,
         "log": data.get("log", []),
     }
 
@@ -1957,6 +2105,61 @@ async def api_get_doc_file(barname: str, doc_key: str, token: str = Query(defaul
         raise HTTPException(status_code=502, detail=f"خطا در دریافت فایل از بله: {e}")
     media_type = "image/jpeg" if doc.get("file_type") == "photo" else "application/octet-stream"
     return StreamingResponse(io.BytesIO(bytes(file_bytes)), media_type=media_type)
+
+
+@dashboard_api.get("/api/barnames/{barname}/attachment/{index}/file")
+async def api_get_attachment_file(barname: str, index: int, token: str = Query(default="")):
+    _check_dashboard_token(token)
+    data = get_barname_data(barname)
+    attachments = data.get("admin_attachments", [])
+    if index < 0 or index >= len(attachments):
+        raise HTTPException(status_code=404, detail="تصویر یافت نشد.")
+    att = attachments[index]
+    if not BOT_INSTANCE:
+        raise HTTPException(status_code=503, detail="ربات هنوز آماده نیست.")
+    try:
+        tg_file = await BOT_INSTANCE.get_file(att["file_id"])
+        file_bytes = await tg_file.download_as_bytearray()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"خطا در دریافت فایل از بله: {e}")
+    media_type = "image/jpeg" if att.get("file_type") == "photo" else "application/octet-stream"
+    return StreamingResponse(io.BytesIO(bytes(file_bytes)), media_type=media_type)
+
+
+@dashboard_api.post("/api/barnames/{barname}/attachment")
+async def api_upload_attachment(barname: str, file: UploadFile = File(...), x_dashboard_token: str = Header(default="")):
+    """آپلود تصویر برای یک بارنامه، مستقیماً از داشبورد وب"""
+    _check_dashboard_token(x_dashboard_token)
+    if not BOT_INSTANCE:
+        raise HTTPException(status_code=503, detail="ربات هنوز آماده نیست.")
+    if not ADMIN_IDS:
+        raise HTTPException(status_code=500, detail="هیچ ادمینی برای ذخیره‌سازی تصویر تنظیم نشده است.")
+
+    data = get_barname_data(barname)
+    if not data.get("documents"):
+        raise HTTPException(status_code=404, detail="بارنامه یافت نشد.")
+
+    content = await file.read()
+    try:
+        sent = await BOT_INSTANCE.send_photo(
+            chat_id=ADMIN_IDS[0],
+            photo=content,
+            caption=f"📎 تصویر افزوده‌شده برای بارنامه {barname} (از داشبورد وب)"
+        )
+        file_id = sent.photo[-1].file_id
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"خطا در ذخیره‌سازی تصویر: {e}")
+
+    attachments = data.setdefault("admin_attachments", [])
+    attachments.append({
+        "file_id": file_id,
+        "file_type": "photo",
+        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "uploaded_by": "ادمین (از طریق داشبورد وب)",
+    })
+    add_barname_log(data, "افزودن تصویر توسط ادمین", actor="ادمین (از طریق داشبورد وب)")
+    save_barname_data(barname, data)
+    return {"ok": True}
 
 
 @dashboard_api.post("/api/barnames/{barname}/approve")
@@ -2086,8 +2289,44 @@ async def api_partial(barname: str, payload: dict = Body(...), x_dashboard_token
     fake_ctx = SimpleNamespace(bot=BOT_INSTANCE)
     await _finalize_review(
         fake_ctx, barname, data,
-        f"⚠️ تأیید با کسری بار ({note}) — از طریق داشبورد وب — در انتظار پاسخ راننده"
+        f"⚠️ تأیید با کسری بار ({note}) — از طریق داشبورد وب — در انتظار پاسخ راننده (برای نهایی‌کردن، دکمه «تایید نهایی» را بزنید)",
+        new_markup=partial_pending_admin_keyboard(rid, barname)
     )
+    return {"ok": True}
+
+
+@dashboard_api.post("/api/barnames/{barname}/finalize-partial")
+async def api_finalize_partial(barname: str, x_dashboard_token: str = Header(default="")):
+    """تایید نهایی بارنامه‌ای که قبلاً «تایید با کسری بار» شده — صرف‌نظر از پاسخ راننده"""
+    _check_dashboard_token(x_dashboard_token)
+    data = get_barname_data(barname)
+    review = data.get("review", {})
+    if review.get("status") != "partial":
+        raise HTTPException(status_code=400, detail="این بارنامه در وضعیت «کسری بار» نیست.")
+
+    review["status"] = "approved"
+    review["reviewed_by"] = "dashboard"
+    review["reviewed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    data["review"] = review
+    add_barname_log(data, "تایید نهایی بارنامه (پس از کسری بار)", actor="ادمین (از طریق داشبورد وب)")
+    save_barname_data(barname, data)
+
+    driver_id = data.get("driver_id")
+    if driver_id and BOT_INSTANCE:
+        try:
+            await BOT_INSTANCE.send_message(
+                chat_id=driver_id,
+                text=(
+                    f"✅ راننده محترم مستندات ارسالی بارنامه شماره {barname} شما تایید شد "
+                    "و ظرف ۲ روز کاری هزینه بارنامه به شماره حساب اعلامی شما واریز خواهد شد."
+                ),
+                reply_markup=driver_reply_keyboard()
+            )
+        except Exception as e:
+            logger.error(f"خطا در اطلاع‌رسانی به راننده از داشبورد: {e}")
+
+    fake_ctx = SimpleNamespace(bot=BOT_INSTANCE)
+    await _finalize_review(fake_ctx, barname, data, "✅ تأیید نهایی شد (از طریق داشبورد وب)")
     return {"ok": True}
 
 
@@ -2239,6 +2478,9 @@ async def run_app():
     app.add_handler(CallbackQueryHandler(review_partial_start, pattern="^radm_part_"))
     app.add_handler(CallbackQueryHandler(driver_partial_accept, pattern="^drv_ok_"))
     app.add_handler(CallbackQueryHandler(driver_partial_reject_start, pattern="^drv_no_"))
+    app.add_handler(CallbackQueryHandler(admin_finalize_partial, pattern="^radm_finalpart_"))
+    app.add_handler(CallbackQueryHandler(admin_attach_photo_start, pattern="^admin_attach_photo_start$"))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, admin_photo_handler))
     # هندلر دکمه‌های منوی Reply (باید قبل از admin_text_handler باشه)
     reply_kb_filter = filters.Regex("^(🚀 آپلود مستندات|📋 راهنما|📦 وضعیت بارنامه|❌ لغو عملیات|🔍 دریافت مستندات|📊 لیست بارنامه‌ها|📈 آمار کلی|🗑 حذف بارنامه|✅ بارنامه‌های تایید شده|🕐 نیازمند بررسی|🏠 منوی اصلی ادمین)$")
     app.add_handler(MessageHandler(reply_kb_filter, reply_keyboard_handler))
