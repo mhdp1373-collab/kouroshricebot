@@ -120,54 +120,34 @@ BALE_API_BASE_URL = "https://tapi.bale.ai/"
 BALE_API_FILE_URL = "https://tapi.bale.ai/file/"
 
 # ─── مراحل مکالمه ───
-WAIT_BARNAME, WAIT_PHOTO, WAIT_CONFIRM = range(3)
+WAIT_BARNAME, WAIT_DOCS = range(2)
 
-# ─── ترتیب و توضیح مستندات ───
-DOC_STEPS = [
-    (
-        "bill",
-        "📄 اصل بارنامه",
-        "📄 *مرحله ۱ از ۴ — اصل بارنامه*\n\n"
-        "لطفاً عکس واضح از *اصل بارنامه* بگیرید و ارسال کنید.\n\n"
-        "⚠️ نکات:\n"
-        "• کل برگه در کادر باشد\n"
-        "• نوشته‌ها خوانا باشند\n"
-        "• عکس تار نباشد"
-    ),
-    (
-        "origin",
-        "🔵 حواله بار مبدأ",
-        "🔵 *مرحله ۲ از ۴ — حواله بار مبدأ*\n\n"
-        "لطفاً عکس *حواله بار مبدأ* (محل بارگیری) را ارسال کنید.\n\n"
-        "⚠️ نکات:\n"
-        "• مهر و امضا باید واضح باشد\n"
-        "• تاریخ حواله مشخص باشد"
-    ),
-    (
-        "dest",
-        "🔴 رسید بار مقصد",
-        "🔴 *مرحله ۳ از ۴ — رسید بار مقصد*\n\n"
-        "لطفاً عکس *رسید بار مقصد* (محل تحویل) را ارسال کنید.\n\n"
-        "⚠️ نکات:\n"
-        "• مهر تحویل‌گیرنده باشد\n"
-        "• امضای تحویل‌گیرنده واضح باشد"
-    ),
-    (
-        "account",
-        "💳 شماره حساب/شبا",
-        "💳 *مرحله ۴ از ۴ — شماره حساب بانکی*\n\n"
-        "لطفاً *شماره حساب بانک تجارت* یا *شماره شبا* سایر بانک‌ها را به نام "
-        "*راننده اول یا دوم* که در بارنامه ذکر شده، ارسال کنید.\n\n"
-        "می‌توانید شماره را به‌صورت *متن* تایپ کنید یا عکس کارت/برگه حاوی شماره را ارسال نمایید.\n\n"
-        "⚠️ نکات:\n"
-        "• نام صاحب حساب باید با نام راننده در بارنامه مطابقت داشته باشد\n"
-        "• شماره شبا با IR شروع می‌شود"
-    ),
-]
+# ─── نگاشت نام مستندات (برای سازگاری با بارنامه‌های قدیمی که با فلوی مرحله‌به‌مرحله ثبت شده‌اند) ───
+DOC_NAMES = {
+    "bill": "📄 اصل بارنامه",
+    "origin": "🔵 حواله بار مبدأ",
+    "dest": "🔴 رسید بار مقصد",
+    "account": "💳 شماره حساب/شبا",
+}
 
-DOC_KEYS = [s[0] for s in DOC_STEPS]
-DOC_NAMES = {s[0]: s[1] for s in DOC_STEPS}
-DOC_GUIDES = {s[0]: s[2] for s in DOC_STEPS}
+def doc_label(key: str, doc_info: dict = None) -> str:
+    """برچسب نمایشی یک مستند. مدارک جدید برچسب خودشان را دارند (مثلاً «مدرک شماره ۲»)،
+    مدارک قدیمی از نگاشت بالا خوانده می‌شوند."""
+    if doc_info and doc_info.get("label"):
+        return doc_info["label"]
+    return DOC_NAMES.get(key, key)
+
+# ─── متن یک‌جای راهنمای ارسال مستندات (فلوی ساده‌شده — بدون مرحله‌به‌مرحله) ───
+UPLOAD_REQUIREMENTS_TEXT = (
+    "📋 لطفاً موارد زیر را برای این بارنامه ارسال کنید:\n\n"
+    "📄 اصل بارنامه\n"
+    "🔵 حواله خروج مبدأ (محل بارگیری)\n"
+    "🔴 رسید تخلیه مقصد\n"
+    "💳 شماره حساب بانکی یا شماره شبا، به نام راننده یا شرکت باربری\n"
+    "   _(اگر شماره حساب فرد دیگری را می‌فرستید، رضایت‌نامه به همراه شماره ملی صاحب حساب را هم ارسال کنید)_\n\n"
+    "📌 لازم نیست به ترتیب خاصی ارسال کنید — هر عکس یا فایلی که آماده دارید همین الان بفرستید.\n"
+    "وقتی همه‌ی مدارک را فرستادید، دکمه‌ی «✅ تایید نهایی...» پایین صفحه را بزنید."
+)
 
 # ─────────── پایگاه داده ───────────
 
@@ -308,46 +288,16 @@ def admin_reply_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def confirm_keyboard(has_prev: bool = False) -> InlineKeyboardMarkup:
-    """کیبورد تأیید عکس — با دکمه بازگشت به مرحله قبل"""
-    rows = [
-        [InlineKeyboardButton("✅ تأیید — برو مرحله بعد", callback_data="confirm_photo")],
-        [InlineKeyboardButton("🔄 عکس رو عوض کن", callback_data="retake_photo")],
-    ]
-    if has_prev:
-        rows.append([InlineKeyboardButton("⬅️ برگشت به مرحله قبل", callback_data="go_prev_step")])
-    rows.append([InlineKeyboardButton("🏁 اتمام و ثبت همین‌ها", callback_data="finish_early")])
-    rows.append([InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_to_main")])
-    return InlineKeyboardMarkup(rows)
-
-def step_waiting_keyboard(has_prev: bool = False) -> InlineKeyboardMarkup:
-    """دکمه‌های زیر راهنمای هر مرحله"""
-    rows = [
-        [InlineKeyboardButton("⏭ این مرحله رو رد کن", callback_data="skip_step")],
-    ]
-    if has_prev:
-        rows.append([InlineKeyboardButton("⬅️ برگشت به مرحله قبل", callback_data="go_prev_step")])
-    rows.append([InlineKeyboardButton("🏁 اتمام و ثبت همین‌ها", callback_data="finish_early")])
-    rows.append([InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_to_main")])
-    return InlineKeyboardMarkup(rows)
-
-def skip_keyboard(has_prev: bool = False) -> InlineKeyboardMarkup:
-    """کیبورد مرحله اختیاری (سایر مستندات)"""
-    rows = [
-        [InlineKeyboardButton("⏭ ندارم، برو بعدی", callback_data="skip_step")],
-    ]
-    if has_prev:
-        rows.append([InlineKeyboardButton("⬅️ برگشت به مرحله قبل", callback_data="go_prev_step")])
-    rows.append([InlineKeyboardButton("🏁 اتمام و ثبت همین‌ها", callback_data="finish_early")])
-    rows.append([InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_to_main")])
-    return InlineKeyboardMarkup(rows)
-
-def final_confirm_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ بله، تأیید نهایی", callback_data="final_confirm")],
-        [InlineKeyboardButton("✏️ ویرایش مستندات", callback_data="edit_docs")],
-        [InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_to_main")],
-    ])
+def upload_docs_keyboard() -> ReplyKeyboardMarkup:
+    """کیبورد ثابت پایین صفحه در حین ارسال مدارک — بدون دکمه شیشه‌ای زیر پیام‌ها"""
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("✅ تایید نهایی تمامی مستندات و ارسال به شرکت")],
+            [KeyboardButton("❌ لغو عملیات")],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="مدارک را ارسال کنید یا تایید نهایی بزنید"
+    )
 
 def review_keyboard(rid: str, barname: str = "") -> InlineKeyboardMarkup:
     """کیبورد بررسی مستندات برای ادمین"""
@@ -378,57 +328,7 @@ def admin_back_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔙 بازگشت به پنل ادمین", callback_data="admin_back")],
     ])
 
-def edit_docs_keyboard(docs: dict) -> InlineKeyboardMarkup:
-    """کیبورد ویرایش مستندات آپلودشده"""
-    rows = []
-    for key in DOC_KEYS:
-        if key in docs:
-            name = DOC_NAMES.get(key, key)
-            rows.append([InlineKeyboardButton(f"🔄 {name}", callback_data=f"edit_doc_{key}")])
-    rows.append([InlineKeyboardButton("🔙 بازگشت به خلاصه", callback_data="back_to_summary")])
-    rows.append([InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_to_main")])
-    return InlineKeyboardMarkup(rows)
-
 # ─────────── کمکی ───────────
-
-def current_step_index(context) -> int:
-    return context.user_data.get("step", 0)
-
-def current_step_key(context) -> str:
-    idx = current_step_index(context)
-    if idx < len(DOC_STEPS):
-        return DOC_STEPS[idx][0]
-    return None
-
-def progress_bar(current: int, total: int) -> str:
-    filled = '▓' * current
-    empty = '░' * (total - current)
-    return f"{filled}{empty} ({current}/{total})"
-
-async def send_step_guide(target, context, is_callback=False):
-    """ارسال راهنمای مرحله فعلی با دکمه بازگشت"""
-    idx = current_step_index(context)
-    if idx >= len(DOC_STEPS):
-        return
-    key, name, guide = DOC_STEPS[idx]
-    barname = context.user_data.get("barname", "")
-    has_prev = idx > 0
-
-    if key == "other":
-        markup = skip_keyboard(has_prev=has_prev)
-    else:
-        markup = step_waiting_keyboard(has_prev=has_prev)
-
-    text = (
-        f"📦 بارنامه: *{barname}*\n"
-        f"📊 {progress_bar(idx, len(DOC_STEPS))}\n\n"
-        f"{guide}"
-    )
-
-    if is_callback:
-        await target.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
-    else:
-        await target.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
 
 async def go_to_main_menu(query, context, is_admin=False):
     """بازگشت به منوی اصلی"""
@@ -447,6 +347,58 @@ async def go_to_main_menu(query, context, is_admin=False):
             parse_mode="Markdown",
             reply_markup=main_menu_keyboard()
         )
+
+# ─────────── یادآوری تایید نهایی (اگر راننده مستندات را فرستاد ولی یادش رفت تایید نهایی بزند) ───────────
+
+UPLOAD_REMINDER_DELAY_SECONDS = 5 * 60  # ۵ دقیقه
+
+def _upload_reminder_job_name(chat_id: int) -> str:
+    return f"upload_reminder_{chat_id}"
+
+def _schedule_upload_reminder(context, chat_id: int, barname: str):
+    """هر بار مدرک جدیدی می‌رسد، این تایمر ریست می‌شود — یعنی یادآوری دقیقاً ۵ دقیقه
+    بعد از آخرین فعالیت راننده ارسال می‌شود، نه ۵ دقیقه بعد از شروع."""
+    if not context.job_queue:
+        return
+    job_name = _upload_reminder_job_name(chat_id)
+    for job in context.job_queue.get_jobs_by_name(job_name):
+        job.schedule_removal()
+    context.job_queue.run_once(
+        _upload_reminder_callback,
+        when=UPLOAD_REMINDER_DELAY_SECONDS,
+        chat_id=chat_id,
+        user_id=chat_id,
+        data={"barname": barname},
+        name=job_name,
+    )
+
+def _cancel_upload_reminder(context, chat_id: int):
+    if not context.job_queue:
+        return
+    for job in context.job_queue.get_jobs_by_name(_upload_reminder_job_name(chat_id)):
+        job.schedule_removal()
+
+async def _upload_reminder_callback(context: ContextTypes.DEFAULT_TYPE):
+    """اگر راننده هنوز داخل همون بارنامه است و تایید نهایی نزده، یادآوری می‌فرستد"""
+    job = context.job
+    barname = job.data.get("barname")
+    # اگر کاربر تایید نهایی زده، لغو کرده، یا رفته سراغ بارنامه‌ی دیگری، user_data دیگر این بارنامه را نشان نمی‌دهد
+    if context.user_data.get("barname") != barname:
+        return
+    session_docs = context.user_data.get("session_documents", {})
+    count = len(session_docs)
+    try:
+        await context.bot.send_message(
+            chat_id=job.chat_id,
+            text=(
+                f"⏰ راننده گرامی، مستندات بارنامه شماره {barname} را هنوز تایید نهایی نکرده‌اید "
+                f"({count} مدرک ارسال شده).\n\n"
+                "اگر مدارک شما کامل است، دکمه‌ی «✅ تایید نهایی...» پایین صفحه را بزنید تا برای شرکت ارسال شود."
+            ),
+            reply_markup=upload_docs_keyboard()
+        )
+    except Exception as e:
+        logger.error(f"خطا در ارسال یادآوری آپلود به {job.chat_id}: {e}")
 
 # ─────────── هندلرهای اصلی ───────────
 
@@ -562,16 +514,16 @@ async def resubmit_barname(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     context.user_data.clear()
     context.user_data["barname"] = barname
-    context.user_data["step"] = 0
     context.user_data["session_documents"] = {}
+    context.user_data["doc_counter"] = 0
 
     await query.message.reply_text(
-        f"🔄 بارگذاری مجدد مستندات بارنامه *{barname}*\n\n"
-        "مستندات را دوباره یک‌به‌یک ارسال کنید 👇",
-        parse_mode="Markdown"
+        f"🔄 بارگذاری مجدد مستندات بارنامه *{barname}*\n\n{UPLOAD_REQUIREMENTS_TEXT}",
+        parse_mode="Markdown",
+        reply_markup=upload_docs_keyboard()
     )
-    await send_step_guide(query, context, is_callback=False)
-    return WAIT_PHOTO
+    _schedule_upload_reminder(context, query.message.chat_id, barname)
+    return WAIT_DOCS
 
 
 async def handle_show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -662,72 +614,137 @@ async def receive_barname(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return ConversationHandler.END
 
     context.user_data["barname"] = barname
-    context.user_data["step"] = 0
     context.user_data["session_documents"] = {}
+    context.user_data["doc_counter"] = 0
 
     await update.message.reply_text(
-        f"✅ بارنامه *{barname}* ثبت شد.\n\n"
-        "الان شروع می‌کنیم — مستندات را یک‌به‌یک آپلود کنید 👇",
-        parse_mode="Markdown"
+        f"✅ بارنامه *{barname}* ثبت شد.\n\n{UPLOAD_REQUIREMENTS_TEXT}",
+        parse_mode="Markdown",
+        reply_markup=upload_docs_keyboard()
     )
+    _schedule_upload_reminder(context, update.effective_chat.id, barname)
+    return WAIT_DOCS
 
-    await send_step_guide(update, context, is_callback=False)
-    return WAIT_PHOTO
 
+async def receive_upload_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """دریافت هر عکس/فایل/متنی که راننده در حین ارسال مدارک بفرستد — بدون مرحله‌بندی و بدون دکمه شیشه‌ای.
+    عکس/فایل به‌صورت یک مدرک شماره‌دار جدید ذخیره می‌شود؛ متن به‌عنوان شماره حساب/شبا در نظر گرفته می‌شود."""
+    barname = context.user_data.get("barname")
+    if not barname:
+        await update.message.reply_text(
+            "⚠️ لطفاً ابتدا از منوی پایین صفحه «🚀 آپلود مستندات» را بزنید.",
+            reply_markup=driver_reply_keyboard()
+        )
+        return ConversationHandler.END
 
-async def receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """دریافت عکس یا متن (برای مرحله شماره حساب/شبا) از راننده"""
-    idx = current_step_index(context)
-    key, name, _ = DOC_STEPS[idx]
-    has_prev = idx > 0
-
+    session_docs = context.user_data.setdefault("session_documents", {})
     photo = update.message.photo[-1] if update.message.photo else None
     doc = update.message.document
     text = update.message.text
 
-    # مرحله شماره حساب/شبا می‌تواند به‌صورت متن هم ارسال شود
-    if key == "account" and text and not photo and not doc:
-        context.user_data["pending_file"] = {"file_id": None, "type": "text", "text": text.strip()}
-        await update.message.reply_text(
-            f"👆 اطلاعات *{name}* دریافت شد:\n\n`{text.strip()}`\n\n"
-            "آیا این اطلاعات صحیح است؟",
-            parse_mode="Markdown",
-            reply_markup=confirm_keyboard(has_prev=has_prev)
-        )
-        return WAIT_CONFIRM
+    if photo or doc:
+        context.user_data["doc_counter"] = context.user_data.get("doc_counter", 0) + 1
+        n = context.user_data["doc_counter"]
+        if photo:
+            file_id, file_type = photo.file_id, "photo"
+        else:
+            file_id, file_type = doc.file_id, "document"
 
-    if not photo and not doc:
-        warn = (
-            "⚠️ لطفاً شماره حساب/شبا را به‌صورت متن تایپ کنید یا عکس آن را ارسال نمایید."
-            if key == "account" else "⚠️ لطفاً عکس ارسال کنید."
-        )
+        session_docs[f"doc_{n}"] = {
+            "file_id": file_id,
+            "file_type": file_type,
+            "text": "",
+            "label": f"📎 مدرک شماره {n}",
+            "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+        count = sum(1 for k in session_docs if k.startswith("doc_"))
         await update.message.reply_text(
-            warn,
-            reply_markup=step_waiting_keyboard(has_prev=has_prev)
+            f"✅ دریافت شد. (مجموع مدارک ارسالی تا الان: {count})\n\n"
+            "اگر مدرک دیگری دارید بفرستید، یا اگر همه‌چیز کامل است دکمه‌ی «✅ تایید نهایی...» پایین صفحه را بزنید."
         )
-        return WAIT_PHOTO
-
-    if photo:
-        file_id = photo.file_id
-        file_type = "photo"
+    elif text and text.strip():
+        session_docs["account"] = {
+            "file_id": None,
+            "file_type": "text",
+            "text": text.strip(),
+            "label": "💳 شماره حساب/شبا اعلامی",
+            "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+        await update.message.reply_text(
+            f"✅ شماره حساب/شبا دریافت شد:\n`{text.strip()}`\n\n"
+            "اگر مدرک دیگری دارید بفرستید، یا اگر همه‌چیز کامل است دکمه‌ی «✅ تایید نهایی...» پایین صفحه را بزنید.",
+            parse_mode="Markdown"
+        )
     else:
-        file_id = doc.file_id
-        file_type = "document"
+        await update.message.reply_text("⚠️ لطفاً فقط عکس، فایل یا شماره حساب/شبا ارسال کنید.")
+        return WAIT_DOCS
 
-    context.user_data["pending_file"] = {"file_id": file_id, "type": file_type}
+    _schedule_upload_reminder(context, update.effective_chat.id, barname)
+    return WAIT_DOCS
+
+
+async def final_confirm_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """دکمه‌ی «✅ تایید نهایی تمامی مستندات و ارسال به شرکت» — فقط از همین نقطه به بعد،
+    مستندات در دیتابیس ذخیره و برای ادمین ارسال می‌شوند"""
+    barname = context.user_data.get("barname")
+    session_docs = context.user_data.get("session_documents", {})
+
+    if not barname:
+        await update.message.reply_text(
+            "⚠️ لطفاً ابتدا از منوی پایین صفحه «🚀 آپلود مستندات» را بزنید.",
+            reply_markup=driver_reply_keyboard()
+        )
+        return ConversationHandler.END
+
+    if not session_docs:
+        await update.message.reply_text(
+            "⚠️ هنوز هیچ مدرکی ارسال نکرده‌اید.\n\nلطفاً ابتدا مدارک را بفرستید، بعد دکمه‌ی تایید نهایی را بزنید."
+        )
+        return WAIT_DOCS
+
+    _cancel_upload_reminder(context, update.effective_chat.id)
+
+    db_data = get_barname_data(barname)
+    if not db_data.get("created_at"):
+        db_data["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    db_data["driver_id"] = update.effective_user.id
+    db_data["driver_name"] = update.effective_user.full_name
+    db_data["documents"] = session_docs
+    db_data["completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    db_data["status"] = "completed"
+    add_barname_log(
+        db_data, "ارسال نهایی مستندات",
+        actor=f"{update.effective_user.full_name} (راننده)",
+        detail=f"{len(session_docs)} مدرک ارسال شد"
+    )
+    save_barname_data(barname, db_data)
+
+    # فوروارد به کانال آرشیو (در صورت تنظیم)
+    if STORAGE_CHANNEL_ID and str(STORAGE_CHANNEL_ID) not in [str(a) for a in ADMIN_IDS]:
+        for doc_key, doc_info in session_docs.items():
+            try:
+                await send_single_doc(
+                    context.bot, STORAGE_CHANNEL_ID, doc_key, doc_info, barname,
+                    extra_caption=f"👤 راننده: {update.effective_user.full_name}"
+                )
+            except Exception as e:
+                logger.error(f"خطا در فوروارد به کانال آرشیو: {e}")
 
     await update.message.reply_text(
-        f"👆 عکس *{name}* دریافت شد!\n\n"
-        "آیا این عکس واضح و کامل است؟",
+        f"✅ *مستندات بارنامه {barname} با موفقیت برای شرکت ارسال شد.*\n\n"
+        "نتیجه‌ی بررسی به‌زودی از طریق همین ربات به شما اطلاع داده خواهد شد.",
         parse_mode="Markdown",
-        reply_markup=confirm_keyboard(has_prev=has_prev)
+        reply_markup=driver_reply_keyboard()
     )
-    return WAIT_CONFIRM
+
+    await dispatch_review_package(context, barname, db_data)
+    context.user_data.clear()
+    return ConversationHandler.END
 
 
 async def send_single_doc(bot, chat_id, doc_key: str, doc_info: dict, barname: str, extra_caption: str = "", parse_mode: str = None):
     """ارسال یک مستند (عکس/فایل/متن) به یک چت مشخص"""
-    label = DOC_NAMES.get(doc_key, doc_key)
+    label = doc_label(doc_key, doc_info)
     caption = f"{label}\n📦 بارنامه: {barname}"
     if extra_caption:
         caption += f"\n{extra_caption}"
@@ -739,283 +756,6 @@ async def send_single_doc(bot, chat_id, doc_key: str, doc_info: dict, barname: s
         await bot.send_document(chat_id=chat_id, document=doc_info["file_id"], caption=caption, parse_mode=parse_mode)
     else:
         await bot.send_message(chat_id=chat_id, text=f"{caption}\n\n📝 {doc_info.get('text', '-')}", parse_mode=parse_mode)
-
-
-async def confirm_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """تأیید عکس/متن و رفتن به مرحله بعد"""
-    query = update.callback_query
-    await query.answer()
-
-    pending = context.user_data.get("pending_file")
-    if not pending:
-        await query.edit_message_text(
-            "⚠️ خطا — اطلاعاتی برای ذخیره یافت نشد.\nلطفاً دوباره ارسال کنید.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 تلاش مجدد", callback_data="retake_photo")],
-                [InlineKeyboardButton("🏠 بازگشت به منو", callback_data="back_to_main")],
-            ])
-        )
-        return WAIT_PHOTO
-
-    barname = context.user_data["barname"]
-    idx = current_step_index(context)
-    key, name, _ = DOC_STEPS[idx]
-
-    session_docs = context.user_data.setdefault("session_documents", {})
-    session_docs[key] = {
-        "file_id": pending["file_id"],
-        "file_type": pending["type"],
-        "text": pending.get("text", ""),
-        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "driver_id": update.effective_user.id,
-    }
-
-    context.user_data["pending_file"] = None
-
-    next_idx = idx + 1
-    context.user_data["step"] = next_idx
-
-    if next_idx >= len(DOC_STEPS):
-        return await show_final_summary(query, context)
-
-    next_key, next_name, next_guide = DOC_STEPS[next_idx]
-
-    await query.edit_message_text(
-        f"✅ *{name}* با موفقیت ذخیره شد!\n\n"
-        f"📊 پیشرفت: {progress_bar(next_idx, len(DOC_STEPS))}\n\n"
-        f"حالا نوبت *{next_name}* است 👇",
-        parse_mode="Markdown"
-    )
-
-    has_prev = next_idx > 0
-    markup = step_waiting_keyboard(has_prev=has_prev)
-
-    barname = context.user_data.get("barname", "")
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=f"📦 بارنامه: *{barname}*\n\n{next_guide}",
-        parse_mode="Markdown",
-        reply_markup=markup
-    )
-
-    return WAIT_PHOTO
-
-
-async def retake_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """عکس رو عوض کن"""
-    query = update.callback_query
-    await query.answer()
-
-    idx = current_step_index(context)
-    key, name, _ = DOC_STEPS[idx]
-    context.user_data["pending_file"] = None
-    has_prev = idx > 0
-
-    await query.edit_message_text(
-        f"🔄 باشه! دوباره عکس *{name}* را ارسال کنید:\n\n"
-        "_(عکس جدید را در چت ارسال کنید)_",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ برگشت به مرحله قبل", callback_data="go_prev_step")] if has_prev else [],
-            [InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_to_main")],
-        ])
-    )
-    return WAIT_PHOTO
-
-
-async def go_prev_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """بازگشت به مرحله قبل"""
-    query = update.callback_query
-    await query.answer()
-
-    idx = current_step_index(context)
-
-    if idx <= 0:
-        # اگر در اولین مرحله‌ایم، برگشت به ورود بارنامه
-        await query.edit_message_text(
-            "📝 لطفاً *شماره بارنامه* را دوباره وارد کنید\n"
-            "یا اگر می‌خواهید بارنامه فعلی را ادامه دهید شماره همان را وارد کنید:",
-            parse_mode="Markdown",
-            reply_markup=barname_entry_keyboard()
-        )
-        context.user_data["step"] = 0
-        return WAIT_BARNAME
-
-    prev_idx = idx - 1
-    context.user_data["step"] = prev_idx
-    context.user_data["pending_file"] = None
-
-    # حذف مستند قبلی اگه ذخیره شده (فقط از حافظه‌ی موقت جلسه، نه دیتابیس)
-    session_docs = context.user_data.get("session_documents", {})
-    prev_key = DOC_STEPS[prev_idx][0]
-    if prev_key in session_docs:
-        del session_docs[prev_key]
-
-    await send_step_guide(query, context, is_callback=True)
-    return WAIT_PHOTO
-
-
-async def skip_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """رد کردن مرحله"""
-    query = update.callback_query
-    await query.answer()
-
-    idx = current_step_index(context)
-    key, name, _ = DOC_STEPS[idx]
-    next_idx = idx + 1
-    context.user_data["step"] = next_idx
-
-    if next_idx >= len(DOC_STEPS):
-        return await show_final_summary(query, context)
-
-    await query.edit_message_text(
-        f"⏭ *{name}* رد شد.\n\n"
-        f"📊 پیشرفت: {progress_bar(next_idx, len(DOC_STEPS))}",
-        parse_mode="Markdown"
-    )
-
-    context.user_data["step"] = next_idx
-    next_key, next_name, next_guide = DOC_STEPS[next_idx]
-    barname = context.user_data.get("barname", "")
-    has_prev = next_idx > 0
-
-    if next_key == "other":
-        markup = skip_keyboard(has_prev=has_prev)
-    else:
-        markup = step_waiting_keyboard(has_prev=has_prev)
-
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=f"📦 بارنامه: *{barname}*\n\n{next_guide}",
-        parse_mode="Markdown",
-        reply_markup=markup
-    )
-    return WAIT_PHOTO
-
-
-async def finish_early(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """اتمام زودهنگام"""
-    query = update.callback_query
-    await query.answer()
-
-    barname = context.user_data.get("barname", "")
-    docs = context.user_data.get("session_documents", {})
-
-    if not docs:
-        await query.edit_message_text(
-            "⚠️ *هنوز هیچ مستندی آپلود نشده!*\n\n"
-            "لطفاً حداقل یک مستند ارسال کنید تا بتوانید ثبت کنید.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 برگشت به مرحله جاری", callback_data="go_back_to_step")],
-                [InlineKeyboardButton("🏠 بازگشت به منوی اصلی", callback_data="back_to_main")],
-            ])
-        )
-        return WAIT_PHOTO
-
-    return await show_final_summary(query, context)
-
-
-async def go_back_to_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """بازگشت به مرحله جاری بدون تغییر"""
-    query = update.callback_query
-    await query.answer()
-    await send_step_guide(query, context, is_callback=True)
-    return WAIT_PHOTO
-
-
-async def show_final_summary(query, context) -> int:
-    """نمایش خلاصه نهایی"""
-    barname = context.user_data.get("barname", "")
-    docs = context.user_data.get("session_documents", {})
-
-    done_list = "\n".join([f"  ✅ {DOC_NAMES.get(k, k)}" for k in docs.keys()]) or "  (هیچ‌کدام)"
-    missing = [k for k in DOC_KEYS if k not in docs]
-    missing_list = "\n".join([f"  ⬜ {DOC_NAMES.get(k, k)}" for k in missing]) if missing else ""
-
-    summary = (
-        f"🎯 *خلاصه بارنامه {barname}*\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"✅ *آپلود شده ({len(docs)}/{len(DOC_KEYS)}):*\n{done_list}\n"
-    )
-    if missing_list:
-        summary += f"\n⬜ *آپلود نشده:*\n{missing_list}\n"
-    summary += "\n━━━━━━━━━━━━━━━━━━━━\n\nآیا همه چیز درست است؟"
-
-    await query.edit_message_text(
-        summary,
-        parse_mode="Markdown",
-        reply_markup=final_confirm_keyboard()
-    )
-    return WAIT_CONFIRM
-
-
-async def edit_docs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """نمایش منوی ویرایش مستندات"""
-    query = update.callback_query
-    await query.answer()
-
-    barname = context.user_data.get("barname", "")
-    docs = context.user_data.get("session_documents", {})
-
-    if not docs:
-        await query.edit_message_text(
-            "⚠️ هیچ مستندی برای ویرایش وجود ندارد.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 بازگشت", callback_data="back_to_summary")],
-            ])
-        )
-        return WAIT_CONFIRM
-
-    await query.edit_message_text(
-        f"✏️ *ویرایش مستندات بارنامه {barname}*\n\n"
-        "کدام مستند را می‌خواهید دوباره آپلود کنید؟",
-        parse_mode="Markdown",
-        reply_markup=edit_docs_keyboard(docs)
-    )
-    return WAIT_CONFIRM
-
-
-async def edit_specific_doc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """شروع دوباره یک مستند خاص"""
-    query = update.callback_query
-    await query.answer()
-
-    doc_key = query.data.replace("edit_doc_", "")
-    idx = DOC_KEYS.index(doc_key) if doc_key in DOC_KEYS else 0
-
-    context.user_data["step"] = idx
-    context.user_data["pending_file"] = None
-
-    barname = context.user_data.get("barname", "")
-    session_docs = context.user_data.get("session_documents", {})
-    if doc_key in session_docs:
-        del session_docs[doc_key]
-
-    name = DOC_NAMES.get(doc_key, doc_key)
-    guide = DOC_GUIDES.get(doc_key, "")
-    has_prev = idx > 0
-
-    if doc_key == "other":
-        markup = skip_keyboard(has_prev=has_prev)
-    else:
-        markup = step_waiting_keyboard(has_prev=has_prev)
-
-    await query.edit_message_text(
-        f"🔄 *ویرایش {name}*\n\n"
-        f"📦 بارنامه: *{barname}*\n\n"
-        f"{guide}",
-        parse_mode="Markdown",
-        reply_markup=markup
-    )
-    return WAIT_PHOTO
-
-
-async def back_to_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """بازگشت به صفحه خلاصه"""
-    query = update.callback_query
-    await query.answer()
-    return await show_final_summary(query, context)
 
 
 async def dispatch_review_package(context, barname: str, db_data: dict) -> str:
@@ -1072,70 +812,6 @@ async def dispatch_review_package(context, barname: str, db_data: dict) -> str:
                 logger.error(f"خطا در ارسال پکیج به ادمین {admin_id}: {e}")
 
     return rid
-
-
-async def final_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """تایید نهایی — تنها از همین نقطه به بعد، مستندات در دیتابیس ذخیره و برای ادمین ارسال می‌شوند"""
-    query = update.callback_query
-    await query.answer()
-
-    barname = context.user_data.get("barname", "")
-    session_docs = context.user_data.get("session_documents", {})
-
-    if not barname or not session_docs:
-        await query.edit_message_text(
-            "⚠️ هیچ مستندی برای ثبت وجود ندارد.\nلطفاً از نو شروع کنید.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🆕 شروع مجدد", callback_data="start_upload")],
-                [InlineKeyboardButton("🏠 منوی اصلی", callback_data="back_to_main")],
-            ])
-        )
-        context.user_data.clear()
-        return ConversationHandler.END
-
-    # از همین‌جا به بعد، ثبت رسمی در دیتابیس انجام می‌شود
-    db_data = get_barname_data(barname)
-    if not db_data.get("created_at"):
-        db_data["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    db_data["driver_id"] = update.effective_user.id
-    db_data["driver_name"] = update.effective_user.full_name
-    db_data["documents"] = session_docs
-    db_data["completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    db_data["status"] = "completed"
-    add_barname_log(
-        db_data, "ارسال نهایی مستندات",
-        actor=f"{update.effective_user.full_name} (راننده)",
-        detail=f"{len(session_docs)} مستند ارسال شد"
-    )
-    save_barname_data(barname, db_data)
-
-    # فوروارد به کانال آرشیو (در صورت تنظیم) — فقط بعد از تایید نهایی
-    if STORAGE_CHANNEL_ID and str(STORAGE_CHANNEL_ID) not in [str(a) for a in ADMIN_IDS]:
-        for doc_key, doc_info in session_docs.items():
-            try:
-                await send_single_doc(
-                    context.bot, STORAGE_CHANNEL_ID, doc_key, doc_info, barname,
-                    extra_caption=f"👤 راننده: {update.effective_user.full_name}"
-                )
-            except Exception as e:
-                logger.error(f"خطا در فوروارد به کانال آرشیو: {e}")
-
-    await dispatch_review_package(context, barname, db_data)
-
-    await query.edit_message_text(
-        f"✅ *مستندات ارسال شد!*\n\n"
-        f"📦 بارنامه: {barname}\n\n"
-        f"🚛 *راننده گرامی،*\n"
-        f"مستندات شما برای بررسی به ادمین ارسال شد. نتیجه بررسی به‌زودی از طریق همین ربات به شما اطلاع داده خواهد شد.\n\n"
-        f"برای بارنامه جدید دکمه زیر را بزنید:",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🆕 بارنامه جدید", callback_data="start_upload")],
-            [InlineKeyboardButton("🏠 منوی اصلی", callback_data="back_to_main")],
-        ])
-    )
-    context.user_data.clear()
-    return ConversationHandler.END
 
 
 # ─────────── بررسی مستندات توسط ادمین ───────────
@@ -1938,7 +1614,7 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     parse_mode="Markdown"
                 )
             except Exception as e:
-                label = DOC_NAMES.get(doc_key, doc_key)
+                label = doc_label(doc_key, doc_info)
                 await update.message.reply_text(f"⚠️ خطا در ارسال {label}: {e}")
 
         await update.message.reply_text(
@@ -2033,13 +1709,15 @@ async def reply_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_T
             "━━━━━━━━━━━━━━━━━━━━\n"
             "🔹 *مستندات مورد نیاز:*\n"
             "۱. 📄 اصل بارنامه\n"
-            "۲. 🔵 حواله بار مبدأ\n"
-            "۳. 🔴 رسید بار مقصد\n"
-            "۴. 💳 شماره حساب بانک تجارت یا شماره شبا (به نام راننده اول یا دوم بارنامه)\n\n"
+            "۲. 🔵 حواله خروج مبدأ (محل بارگیری)\n"
+            "۳. 🔴 رسید تخلیه مقصد\n"
+            "۴. 💳 شماره حساب یا شماره شبا، به نام راننده یا شرکت باربری\n"
+            "   (در صورت ارسال شماره حساب شخص دیگر، رضایت‌نامه به همراه شماره ملی صاحب حساب هم ارسال شود)\n\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             "💡 *نکات مهم:*\n"
             "• عکس‌ها باید واضح و خوانا باشند\n"
-            "• در هر مرحله می‌توانید برگردید\n"
+            "• لازم نیست به ترتیب خاصی ارسال کنید، هرکدام را که آماده دارید بفرستید\n"
+            "• وقتی همه‌ی مدارک را فرستادید، دکمه‌ی «✅ تایید نهایی...» پایین صفحه را بزنید\n"
             "• /cancel برای لغو کامل عملیات",
             parse_mode="Markdown",
             reply_markup=driver_reply_keyboard()
@@ -2059,7 +1737,7 @@ async def reply_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_T
             for bn, data in rows[:20]:
                 doc_count = len(data.get("documents", {}))
                 status = review_status_label(data)
-                lines.append(f"{status} | `{bn}` | {doc_count}/{len(DOC_STEPS)} مستند | {data.get('created_at', '-')}")
+                lines.append(f"{status} | `{bn}` | {doc_count} مدرک | {data.get('created_at', '-')}")
 
             text_msg = "📦 *وضعیت بارنامه‌های شما:*\n\n" + "\n".join(lines)
             if len(rows) > 20:
@@ -2159,24 +1837,20 @@ async def reply_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    _cancel_upload_reminder(context, update.effective_chat.id)
     context.user_data.clear()
-    await update.message.reply_text(
-        "❌ عملیات لغو شد.",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    # نمایش منوی اصلی بعد از لغو
     user = update.effective_user
     if user.id in ADMIN_IDS:
         await update.message.reply_text(
-            "🔐 *پنل مدیریت پی‌بار*",
+            "❌ عملیات لغو شد.\n\n🔐 *پنل مدیریت پی‌بار*",
             parse_mode="Markdown",
-            reply_markup=admin_keyboard()
+            reply_markup=admin_reply_keyboard()
         )
     else:
         await update.message.reply_text(
-            "🏠 *منوی اصلی*\nبرای شروع مجدد دکمه زیر را بزنید:",
+            "❌ عملیات لغو شد.\n\nبرای شروع مجدد از منوی پایین صفحه استفاده کنید:",
             parse_mode="Markdown",
-            reply_markup=main_menu_keyboard()
+            reply_markup=driver_reply_keyboard()
         )
     return ConversationHandler.END
 
@@ -2274,7 +1948,7 @@ async def api_get_barname(barname: str, x_dashboard_token: str = Header(default=
     for key, info in data.get("documents", {}).items():
         docs.append({
             "key": key,
-            "label": DOC_NAMES.get(key, key),
+            "label": doc_label(key, info),
             "file_type": info.get("file_type"),
             "text": info.get("text", ""),
             "uploaded_at": info.get("uploaded_at", ""),
@@ -2671,27 +2345,12 @@ async def run_app():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_barname),
                 CallbackQueryHandler(back_to_main, pattern="^back_to_main$"),
             ],
-            WAIT_PHOTO: [
-                MessageHandler(filters.Regex("^(🚀 آپلود مستندات|📋 راهنما|📦 وضعیت بارنامه|❌ لغو عملیات|🔍 دریافت مستندات|📊 لیست بارنامه‌ها|📈 آمار کلی|🗑 حذف بارنامه|✅ بارنامه‌های تایید شده|🕐 نیازمند بررسی|🏠 منوی اصلی ادمین)$"), reply_keyboard_handler),
-                MessageHandler(filters.PHOTO | filters.Document.ALL, receive_photo),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_photo),
-                CallbackQueryHandler(skip_step, pattern="^skip_step$"),
-                CallbackQueryHandler(finish_early, pattern="^finish_early$"),
-                CallbackQueryHandler(go_prev_step, pattern="^go_prev_step$"),
-                CallbackQueryHandler(go_back_to_step, pattern="^go_back_to_step$"),
-                CallbackQueryHandler(back_to_main, pattern="^back_to_main$"),
-                CallbackQueryHandler(edit_specific_doc, pattern="^edit_doc_"),
-            ],
-            WAIT_CONFIRM: [
-                MessageHandler(filters.Regex("^(🚀 آپلود مستندات|📋 راهنما|📦 وضعیت بارنامه|❌ لغو عملیات|🔍 دریافت مستندات|📊 لیست بارنامه‌ها|📈 آمار کلی|🗑 حذف بارنامه|✅ بارنامه‌های تایید شده|🕐 نیازمند بررسی|🏠 منوی اصلی ادمین)$"), reply_keyboard_handler),
-                CallbackQueryHandler(confirm_photo, pattern="^confirm_photo$"),
-                CallbackQueryHandler(retake_photo, pattern="^retake_photo$"),
-                CallbackQueryHandler(finish_early, pattern="^finish_early$"),
-                CallbackQueryHandler(go_prev_step, pattern="^go_prev_step$"),
-                CallbackQueryHandler(final_confirm, pattern="^final_confirm$"),
-                CallbackQueryHandler(edit_docs, pattern="^edit_docs$"),
-                CallbackQueryHandler(edit_specific_doc, pattern="^edit_doc_"),
-                CallbackQueryHandler(back_to_summary, pattern="^back_to_summary$"),
+            WAIT_DOCS: [
+                MessageHandler(filters.Regex("^❌ لغو عملیات$"), cancel),
+                MessageHandler(filters.Regex("^✅ تایید نهایی تمامی مستندات و ارسال به شرکت$"), final_confirm_upload),
+                MessageHandler(filters.Regex("^(🚀 آپلود مستندات|📋 راهنما|📦 وضعیت بارنامه|🔍 دریافت مستندات|📊 لیست بارنامه‌ها|📈 آمار کلی|🗑 حذف بارنامه|✅ بارنامه‌های تایید شده|🕐 نیازمند بررسی|🏠 منوی اصلی ادمین)$"), reply_keyboard_handler),
+                MessageHandler(filters.PHOTO | filters.Document.ALL, receive_upload_item),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_upload_item),
                 CallbackQueryHandler(back_to_main, pattern="^back_to_main$"),
             ],
         },
