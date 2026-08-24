@@ -242,7 +242,12 @@ def review_status_label(db_data: dict) -> str:
     if status == "rejected":
         return "❌ تایید نشده"
     if status == "partial":
-        return "⚠️ تایید با کسری بار"
+        resp = review.get("driver_response")
+        if resp == "accepted":
+            return "⚠️ کسری بار (راننده تایید کرد)"
+        if resp == "rejected":
+            return "⚠️ کسری بار (راننده تایید نکرد)"
+        return "⚠️ کسری بار (در انتظار پاسخ راننده)"
     if status == "pending":
         return "🕐 در انتظار بررسی"
     return "⏳ ثبت نشده / ناقص"
