@@ -519,12 +519,40 @@ async def resubmit_barname(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return ConversationHandler.END
 
     existing = get_barname_data(barname)
-    if existing.get("review", {}).get("status") == "approved":
+    existing_review = existing.get("review", {})
+    existing_status = existing_review.get("status")
+
+    if existing_status == "approved":
         await query.message.reply_text(
             f"⚠️ بارنامه شماره {barname} قبلاً ارسال شده و مورد تایید قرار گرفته است، "
             f"اگر تا کنون واریز به حساب شما انجام نشده است به آیدی ادمین {ADMIN_USERNAME} پیگیری فرمایید.",
             reply_markup=driver_reply_keyboard()
         )
+        return ConversationHandler.END
+
+    if existing_status == "partial":
+        driver_response = existing_review.get("driver_response")
+        rid = existing_review.get("id", "")
+        deduction_note = existing_review.get("deduction_note", "-")
+
+        if driver_response == "accepted":
+            await query.message.reply_text(
+                f"⚠️ بارنامه شماره {barname} دارای کسری تایید شده‌ی شما می‌باشد، "
+                "لطفاً تا زمان بررسی و تایید ادمین صبور باشید.",
+                reply_markup=driver_reply_keyboard()
+            )
+        elif driver_response == "rejected":
+            await query.message.reply_text(
+                f"⚠️ بارنامه شماره {barname} دارای کسری می‌باشد که قبلاً توسط شما تایید نشده است، "
+                f"لطفاً تا زمان بررسی و تایید ادمین صبور باشید و یا با آیدی ادمین {ADMIN_USERNAME} پیگیری نمایید.",
+                reply_markup=driver_reply_keyboard()
+            )
+        else:
+            await query.message.reply_text(
+                f"⚠️ بارنامه شماره {barname} را قبلاً ارسال کرده‌اید و دارای کسری «{deduction_note}» می‌باشد.\n\n"
+                "در صورت تایید، از کرایه‌ی بارنامه مبلغ آن کسر و مابقی به حساب شما واریز می‌گردد.",
+                reply_markup=driver_partial_response_keyboard(rid)
+            )
         return ConversationHandler.END
 
     context.user_data.clear()
@@ -590,12 +618,41 @@ async def receive_barname(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     # اگر این بارنامه قبلاً تایید نهایی شده، اجازه‌ی ارسال مجدد داده نمی‌شود
     existing = get_barname_data(barname)
-    if existing.get("review", {}).get("status") == "approved":
+    existing_review = existing.get("review", {})
+    existing_status = existing_review.get("status")
+
+    if existing_status == "approved":
         await update.message.reply_text(
             f"⚠️ بارنامه شماره {barname} قبلاً ارسال شده و مورد تایید قرار گرفته است، "
             f"اگر تا کنون واریز به حساب شما انجام نشده است به آیدی ادمین {ADMIN_USERNAME} پیگیری فرمایید.",
             reply_markup=driver_reply_keyboard()
         )
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    if existing_status == "partial":
+        driver_response = existing_review.get("driver_response")
+        rid = existing_review.get("id", "")
+        deduction_note = existing_review.get("deduction_note", "-")
+
+        if driver_response == "accepted":
+            await update.message.reply_text(
+                f"⚠️ بارنامه شماره {barname} دارای کسری تایید شده‌ی شما می‌باشد، "
+                "لطفاً تا زمان بررسی و تایید ادمین صبور باشید.",
+                reply_markup=driver_reply_keyboard()
+            )
+        elif driver_response == "rejected":
+            await update.message.reply_text(
+                f"⚠️ بارنامه شماره {barname} دارای کسری می‌باشد که قبلاً توسط شما تایید نشده است، "
+                f"لطفاً تا زمان بررسی و تایید ادمین صبور باشید و یا با آیدی ادمین {ADMIN_USERNAME} پیگیری نمایید.",
+                reply_markup=driver_reply_keyboard()
+            )
+        else:
+            await update.message.reply_text(
+                f"⚠️ بارنامه شماره {barname} را قبلاً ارسال کرده‌اید و دارای کسری «{deduction_note}» می‌باشد.\n\n"
+                "در صورت تایید، از کرایه‌ی بارنامه مبلغ آن کسر و مابقی به حساب شما واریز می‌گردد.",
+                reply_markup=driver_partial_response_keyboard(rid)
+            )
         context.user_data.clear()
         return ConversationHandler.END
 
