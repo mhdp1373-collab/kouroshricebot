@@ -107,13 +107,11 @@ STORAGE_CHANNEL_ID = os.getenv("STORAGE_CHANNEL_ID", "")
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@koroshrice")
 DB_FILE = _data_path("database.json")
 
-# ─── تنظیمات داشبورد وب ادمین (سیستم یوزرنیم/رمز عبور) ───
-# این دو متغیر فقط برای ساخت اولین کاربر ادمین استفاده می‌شن (bootstrap) — بعد از اولین اجرا،
-# مدیریت کاربرها (ساخت/حذف/تغییر نقش/تغییر رمز) از داخل خودِ پنل ادمین انجام می‌شه.
-DASHBOARD_ADMIN_USER = os.getenv("DASHBOARD_ADMIN_USER", "").strip()
-DASHBOARD_ADMIN_PASSWORD = os.getenv("DASHBOARD_ADMIN_PASSWORD", "").strip()
-# کلید امضای نشست‌های ورود (session token). اگر ثابت نباشه، با هر ری‌استارت همه باید دوباره لاگین کنن.
-SESSION_SECRET = os.getenv("SESSION_SECRET", "").strip()
+# ─── تنظیمات داشبورد وب ادمین ───
+# DASHBOARD_TOKEN: دسترسی کامل (مشاهده + تایید/رد/کسری/آپلود/پیام)
+# DASHBOARD_VIEWER_TOKEN: فقط مشاهده (اختیاری — اگر خالی باشد، نقش «مشاهده‌گر» غیرفعال است)
+DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN", "")
+DASHBOARD_VIEWER_TOKEN = os.getenv("DASHBOARD_VIEWER_TOKEN", "")
 PORT = int(os.getenv("PORT", "8080"))
 BOT_INSTANCE = None  # بعد از ساخته‌شدن Application مقداردهی می‌شود
 
