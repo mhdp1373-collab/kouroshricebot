@@ -27,6 +27,10 @@ import io
 import json
 import uuid
 import hashlib
+import hmac
+import base64
+import secrets
+import time
 import asyncio
 import logging
 from types import SimpleNamespace
@@ -103,8 +107,13 @@ STORAGE_CHANNEL_ID = os.getenv("STORAGE_CHANNEL_ID", "")
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@koroshrice")
 DB_FILE = _data_path("database.json")
 
-# ─── تنظیمات داشبورد وب ادمین ───
-DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN", "")
+# ─── تنظیمات داشبورد وب ادمین (سیستم یوزرنیم/رمز عبور) ───
+# این دو متغیر فقط برای ساخت اولین کاربر ادمین استفاده می‌شن (bootstrap) — بعد از اولین اجرا،
+# مدیریت کاربرها (ساخت/حذف/تغییر نقش/تغییر رمز) از داخل خودِ پنل ادمین انجام می‌شه.
+DASHBOARD_ADMIN_USER = os.getenv("DASHBOARD_ADMIN_USER", "").strip()
+DASHBOARD_ADMIN_PASSWORD = os.getenv("DASHBOARD_ADMIN_PASSWORD", "").strip()
+# کلید امضای نشست‌های ورود (session token). اگر ثابت نباشه، با هر ری‌استارت همه باید دوباره لاگین کنن.
+SESSION_SECRET = os.getenv("SESSION_SECRET", "").strip()
 PORT = int(os.getenv("PORT", "8080"))
 BOT_INSTANCE = None  # بعد از ساخته‌شدن Application مقداردهی می‌شود
 
@@ -511,6 +520,15 @@ async def resubmit_barname(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await query.message.reply_text("⚠️ بارنامه یافت نشد.")
         return ConversationHandler.END
 
+    existing = get_barname_data(barname)
+    if existing.get("review", {}).get("status") == "approved":
+        await query.message.reply_text(
+            f"⚠️ بارنامه شماره {barname} قبلاً ارسال شده و مورد تایید قرار گرفته است، "
+            f"اگر تا کنون واریز به حساب شما انجام نشده است به آیدی ادمین {ADMIN_USERNAME} پیگیری فرمایید.",
+            reply_markup=driver_reply_keyboard()
+        )
+        return ConversationHandler.END
+
     context.user_data.clear()
     context.user_data["barname"] = barname
     context.user_data["step"] = 0
@@ -571,6 +589,17 @@ async def receive_barname(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             reply_markup=barname_entry_keyboard()
         )
         return WAIT_BARNAME
+
+    # اگر این بارنامه قبلاً تایید نهایی شده، اجازه‌ی ارسال مجدد داده نمی‌شود
+    existing = get_barname_data(barname)
+    if existing.get("review", {}).get("status") == "approved":
+        await update.message.reply_text(
+            f"⚠️ بارنامه شماره {barname} قبلاً ارسال شده و مورد تایید قرار گرفته است، "
+            f"اگر تا کنون واریز به حساب شما انجام نشده است به آیدی ادمین {ADMIN_USERNAME} پیگیری فرمایید.",
+            reply_markup=driver_reply_keyboard()
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
 
     context.user_data["barname"] = barname
     context.user_data["step"] = 0
@@ -2099,11 +2128,37 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 dashboard_api = FastAPI(title="داشبورد پی‌بار")
 
 
-def _check_dashboard_token(token: str):
+def _resolve_dashboard_role(token: str) -> str:
+    """توکن را بررسی می‌کند و نقش متناظر را برمی‌گرداند: 'admin' یا 'viewer'.
+    برای درخواست‌های نامعتبر، خطای مناسب را raise می‌کند."""
     if not DASHBOARD_TOKEN:
         raise HTTPException(status_code=503, detail="DASHBOARD_TOKEN روی سرور تنظیم نشده است.")
-    if not token or token != DASHBOARD_TOKEN:
-        raise HTTPException(status_code=401, detail="توکن نامعتبر است.")
+    if token and token == DASHBOARD_TOKEN:
+        return "admin"
+    if token and DASHBOARD_VIEWER_TOKEN and token == DASHBOARD_VIEWER_TOKEN:
+        return "viewer"
+    raise HTTPException(status_code=401, detail="توکن نامعتبر است.")
+
+
+def _check_dashboard_token(token: str) -> str:
+    """هر توکن معتبری (ادمین یا مشاهده‌گر) را قبول می‌کند — برای endpointهای فقط-خواندنی."""
+    return _resolve_dashboard_role(token)
+
+
+def _require_admin_token(token: str) -> str:
+    """فقط توکن ادمین را قبول می‌کند — برای endpointهایی که داده را تغییر می‌دهند
+    (تایید/رد/کسری/پیام/آپلود/نوع محصول). توکن مشاهده‌گر اینجا رد می‌شود."""
+    role = _resolve_dashboard_role(token)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="این عملیات فقط برای ادمین مجاز است — شما فقط دسترسی مشاهده دارید.")
+    return role
+
+
+@dashboard_api.get("/api/whoami")
+async def api_whoami(x_dashboard_token: str = Header(default="")):
+    """نقش صاحب توکن فعلی را برمی‌گرداند تا داشبورد بداند دکمه‌های اقدام را نشان بدهد یا نه."""
+    role = _resolve_dashboard_role(x_dashboard_token)
+    return {"role": role}
 
 
 @dashboard_api.get("/", response_class=HTMLResponse)
@@ -2183,7 +2238,7 @@ async def api_get_barname(barname: str, x_dashboard_token: str = Header(default=
 @dashboard_api.post("/api/barnames/{barname}/product-type")
 async def api_set_product_type(barname: str, x_dashboard_token: str = Header(default=""), body: dict = Body(...)):
     """ثبت/ویرایش نوع محصول یک بارنامه (مثلاً برنج ایرانی، برنج خارجی، شکر، آرد و ...)"""
-    _check_dashboard_token(x_dashboard_token)
+    _require_admin_token(x_dashboard_token)
     product_type = (body.get("type") or "").strip()
 
     data = get_barname_data(barname)
@@ -2272,7 +2327,7 @@ async def api_upload_attachment(
     caption: str = Form(default=""),
 ):
     """آپلود مستقیم عکس/فایل برای یک بارنامه از داخل داشبورد (بدون نیاز به چت با ربات)"""
-    _check_dashboard_token(x_dashboard_token)
+    _require_admin_token(x_dashboard_token)
     data = get_barname_data(barname)
     if not data.get("created_at"):
         raise HTTPException(status_code=404, detail="بارنامه یافت نشد.")
@@ -2314,7 +2369,7 @@ async def api_upload_attachment(
 
 @dashboard_api.post("/api/barnames/{barname}/approve")
 async def api_approve(barname: str, x_dashboard_token: str = Header(default="")):
-    _check_dashboard_token(x_dashboard_token)
+    _require_admin_token(x_dashboard_token)
     data = get_barname_data(barname)
     review = data.get("review", {})
     was_partial = review.get("status") == "partial"
@@ -2366,7 +2421,7 @@ async def api_approve(barname: str, x_dashboard_token: str = Header(default=""))
 
 @dashboard_api.post("/api/barnames/{barname}/reject")
 async def api_reject(barname: str, payload: dict = Body(...), x_dashboard_token: str = Header(default="")):
-    _check_dashboard_token(x_dashboard_token)
+    _require_admin_token(x_dashboard_token)
     reason = (payload.get("reason") or "").strip()
     if not reason:
         raise HTTPException(status_code=400, detail="علت عدم تایید الزامی است.")
@@ -2414,7 +2469,7 @@ async def api_reject(barname: str, payload: dict = Body(...), x_dashboard_token:
 
 @dashboard_api.post("/api/barnames/{barname}/partial")
 async def api_partial(barname: str, payload: dict = Body(...), x_dashboard_token: str = Header(default="")):
-    _check_dashboard_token(x_dashboard_token)
+    _require_admin_token(x_dashboard_token)
     note = (payload.get("note") or "").strip()
     if not note:
         raise HTTPException(status_code=400, detail="مقدار کسری بار الزامی است.")
@@ -2464,7 +2519,7 @@ async def api_partial(barname: str, payload: dict = Body(...), x_dashboard_token
 
 @dashboard_api.post("/api/barnames/{barname}/message")
 async def api_custom_message(barname: str, payload: dict = Body(...), x_dashboard_token: str = Header(default="")):
-    _check_dashboard_token(x_dashboard_token)
+    _require_admin_token(x_dashboard_token)
     text = (payload.get("text") or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="متن پیام الزامی است.")
@@ -2516,6 +2571,8 @@ async def run_app():
 
     if not DASHBOARD_TOKEN:
         logger.warning("⚠️ متغیر DASHBOARD_TOKEN تنظیم نشده — داشبورد وب غیرفعال خواهد بود (همه‌ی درخواست‌ها 503 می‌گیرند).")
+    elif DASHBOARD_VIEWER_TOKEN:
+        logger.info("👁️ نقش «مشاهده‌گر» برای داشبورد فعال است (DASHBOARD_VIEWER_TOKEN تنظیم شده).")
 
     if os.path.exists(DB_FILE):
         try:
