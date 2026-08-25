@@ -18,7 +18,7 @@
      به همین دلیل در این نسخه به‌جای لینک کلیک‌پذیر، آیدی راننده به‌صورت
      متن قابل‌کپی (`کد`) نمایش داده می‌شود.
    - محدودیت حجم فایل/عکس و نرخ ارسال پیام ممکن است با تلگرام فرق داشته باشد.
-4. پیشنهاد می‌شود قبل از استفاده‌ی نهایی، کل سناریوها (آپلود، تایید،
+4. پیشنهاد می‌شود قبل از استفاده‌ی نهایی، کل سناریوها (بارگزاری، تایید،
    عدم تایید، کسری بار، پاسخ راننده) را یک‌بار کامل روی بله تست کنید.
 """
 
@@ -35,6 +35,7 @@ import asyncio
 import logging
 from types import SimpleNamespace
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton
@@ -47,8 +48,23 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Header, Query, Body, File, UploadFile, Form
 from fastapi.responses import HTMLResponse, StreamingResponse
 import uvicorn
+from openpyxl import Workbook
+from openpyxl.utils import get_column_letter
 
 load_dotenv()
+
+# ─── زمان به وقت تهران ───
+# سرور (Railway) معمولاً روی UTC اجراست؛ همه‌ی تاریخ/ساعت‌های ذخیره‌شده در دیتابیس و
+# نمایش داده‌شده در ربات/داشبورد باید به وقت تهران باشند، نه وقت سرور.
+TEHRAN_TZ = ZoneInfo("Asia/Tehran")
+
+def now_tehran() -> datetime:
+    """زمان فعلی به وقت تهران (بدون tzinfo، تا با رشته‌های ذخیره‌شده در دیتابیس سازگار بماند)"""
+    return datetime.now(TEHRAN_TZ).replace(tzinfo=None)
+
+def now_str(with_seconds: bool = False) -> str:
+    fmt = "%Y-%m-%d %H:%M:%S" if with_seconds else "%Y-%m-%d %H:%M"
+    return now_tehran().strftime(fmt)
 
 # ─── مسیر ذخیره‌سازی دائمی ───
 # روی Railway (و بیشتر PaaSها)، فضای پیش‌فرض کانتینر ephemeral است: با هر دیپلوی/ری‌استارت
@@ -108,7 +124,7 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@koroshrice")
 DB_FILE = _data_path("database.json")
 
 # ─── تنظیمات داشبورد وب ادمین ───
-# DASHBOARD_TOKEN: دسترسی کامل (مشاهده + تایید/رد/کسری/آپلود/پیام)
+# DASHBOARD_TOKEN: دسترسی کامل (مشاهده + تایید/رد/کسری/بارگزاری/پیام)
 # DASHBOARD_VIEWER_TOKEN: فقط مشاهده (اختیاری — اگر خالی باشد، نقش «مشاهده‌گر» غیرفعال است)
 DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN", "")
 DASHBOARD_VIEWER_TOKEN = os.getenv("DASHBOARD_VIEWER_TOKEN", "")
@@ -184,7 +200,7 @@ def add_barname_log(data: dict, event: str, actor: str = "", detail: str = ""):
     if "log" not in data or not isinstance(data.get("log"), list):
         data["log"] = []
     data["log"].append({
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "time": now_str(with_seconds=True),
         "event": event,
         "actor": actor,
         "detail": detail,
@@ -232,6 +248,22 @@ def review_status_label(db_data: dict) -> str:
         return "🕐 در انتظار بررسی"
     return "⏳ ثبت نشده / ناقص"
 
+# رویدادهایی که واقعاً «تصمیم/واکنش ادمین به درخواست» محسوب می‌شوند (نه اقدامات جانبی مثل افزودن عکس یا تغییر نوع محصول)
+ADMIN_DECISION_EVENTS = {
+    "تایید مستندات", "عدم تایید مستندات", "تایید با کسری بار",
+    "تایید نهایی بارنامه (پس از کسری بار)",
+}
+
+def admin_response_times(data: dict):
+    """اولین و آخرین زمان واکنش (تصمیم) ادمین به یک بارنامه را برمی‌گرداند — (اولین, آخرین) یا (None, None)"""
+    times = sorted(
+        e.get("time", "") for e in data.get("log", [])
+        if e.get("event") in ADMIN_DECISION_EVENTS and "ادمین" in (e.get("actor") or "")
+    )
+    if not times:
+        return None, None
+    return times[0], times[-1]
+
 def get_driver_barnames(driver_id: int):
     """همه‌ی بارنامه‌های ثبت‌شده توسط یک راننده، از دیتابیس (نه حافظه‌ی موقت)"""
     db = load_db()
@@ -247,7 +279,7 @@ def get_driver_barnames(driver_id: int):
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     """منوی اصلی راننده"""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚀 شروع آپلود مستندات", callback_data="start_upload")],
+        [InlineKeyboardButton("🚀 شروع بارگزاری مدارک", callback_data="start_upload")],
         [InlineKeyboardButton("📋 راهنما", callback_data="show_help")],
     ])
 
@@ -267,7 +299,7 @@ def driver_reply_keyboard() -> ReplyKeyboardMarkup:
     """منوی ثابت پایین صفحه برای راننده"""
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton("🚀 آپلود مستندات"), KeyboardButton("📋 راهنما")],
+            [KeyboardButton("🚀 بارگزاری مدارک"), KeyboardButton("📋 راهنما")],
             [KeyboardButton("📦 وضعیت بارنامه"), KeyboardButton("❌ لغو عملیات")],
         ],
         resize_keyboard=True,
@@ -343,21 +375,21 @@ async def go_to_main_menu(query, context, is_admin=False):
         )
     else:
         await query.edit_message_text(
-            f"🏠 *منوی اصلی پی‌بار*\n\nسلام {user_name} عزیز!\nبرای شروع آپلود مستندات دکمه زیر را بزنید:",
+            f"🏠 *منوی اصلی پی‌بار*\n\nسلام {user_name} عزیز!\nبرای شروع بارگزاری مدارک دکمه زیر را بزنید:",
             parse_mode="Markdown",
             reply_markup=main_menu_keyboard()
         )
 
 # ─────────── یادآوری تایید نهایی (اگر راننده مستندات را فرستاد ولی یادش رفت تایید نهایی بزند) ───────────
 
-UPLOAD_REMINDER_DELAY_SECONDS = 5 * 60  # ۵ دقیقه
+UPLOAD_REMINDER_DELAY_SECONDS = 2 * 60  # ۲ دقیقه
 
 def _upload_reminder_job_name(chat_id: int) -> str:
     return f"upload_reminder_{chat_id}"
 
 def _schedule_upload_reminder(context, chat_id: int, barname: str):
-    """هر بار مدرک جدیدی می‌رسد، این تایمر ریست می‌شود — یعنی یادآوری دقیقاً ۵ دقیقه
-    بعد از آخرین فعالیت راننده ارسال می‌شود، نه ۵ دقیقه بعد از شروع."""
+    """هر بار مدرک جدیدی می‌رسد، این تایمر ریست می‌شود — یعنی یادآوری دقیقاً ۲ دقیقه
+    بعد از آخرین فعالیت راننده ارسال می‌شود، نه ۲ دقیقه بعد از شروع."""
     if not context.job_queue:
         return
     job_name = _upload_reminder_job_name(chat_id)
@@ -398,7 +430,7 @@ async def _upload_reminder_callback(context: ContextTypes.DEFAULT_TYPE):
             reply_markup=upload_docs_keyboard()
         )
     except Exception as e:
-        logger.error(f"خطا در ارسال یادآوری آپلود به {job.chat_id}: {e}")
+        logger.error(f"خطا در ارسال یادآوری بارگزاری به {job.chat_id}: {e}")
 
 # ─────────── هندلرهای اصلی ───────────
 
@@ -441,7 +473,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def handle_start_upload_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """دکمه‌ی «🚀 آپلود مستندات» از منوی پایین صفحه — باید entry_point مکالمه باشد تا وضعیت درست ثبت شود"""
+    """دکمه‌ی «🚀 بارگزاری مدارک» از منوی پایین صفحه — باید entry_point مکالمه باشد تا وضعیت درست ثبت شود"""
     await update.message.reply_text(
         "📝 لطفاً *شماره بارنامه* را وارد کنید:",
         parse_mode="Markdown",
@@ -451,7 +483,7 @@ async def handle_start_upload_button(update: Update, context: ContextTypes.DEFAU
 
 
 async def handle_start_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """شروع فرایند آپلود از منوی اصلی"""
+    """شروع فرایند بارگزاری از منوی اصلی"""
     query = update.callback_query
     await query.answer()
 
@@ -547,7 +579,7 @@ async def handle_show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /cancel برای لغو کامل عملیات",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🚀 شروع آپلود", callback_data="start_upload")],
+            [InlineKeyboardButton("🚀 شروع بارگزاری", callback_data="start_upload")],
             [InlineKeyboardButton("🏠 منوی اصلی", callback_data="back_to_main")],
         ])
     )
@@ -632,7 +664,7 @@ async def receive_upload_item(update: Update, context: ContextTypes.DEFAULT_TYPE
     barname = context.user_data.get("barname")
     if not barname:
         await update.message.reply_text(
-            "⚠️ لطفاً ابتدا از منوی پایین صفحه «🚀 آپلود مستندات» را بزنید.",
+            "⚠️ لطفاً ابتدا از منوی پایین صفحه «🚀 بارگزاری مدارک» را بزنید.",
             reply_markup=driver_reply_keyboard()
         )
         return ConversationHandler.END
@@ -655,7 +687,7 @@ async def receive_upload_item(update: Update, context: ContextTypes.DEFAULT_TYPE
             "file_type": file_type,
             "text": "",
             "label": f"📎 مدرک شماره {n}",
-            "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "uploaded_at": now_str(),
         }
         count = sum(1 for k in session_docs if k.startswith("doc_"))
         await update.message.reply_text(
@@ -668,7 +700,7 @@ async def receive_upload_item(update: Update, context: ContextTypes.DEFAULT_TYPE
             "file_type": "text",
             "text": text.strip(),
             "label": "💳 شماره حساب/شبا اعلامی",
-            "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "uploaded_at": now_str(),
         }
         await update.message.reply_text(
             f"✅ شماره حساب/شبا دریافت شد:\n`{text.strip()}`\n\n"
@@ -691,7 +723,7 @@ async def final_confirm_upload(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if not barname:
         await update.message.reply_text(
-            "⚠️ لطفاً ابتدا از منوی پایین صفحه «🚀 آپلود مستندات» را بزنید.",
+            "⚠️ لطفاً ابتدا از منوی پایین صفحه «🚀 بارگزاری مدارک» را بزنید.",
             reply_markup=driver_reply_keyboard()
         )
         return ConversationHandler.END
@@ -706,11 +738,11 @@ async def final_confirm_upload(update: Update, context: ContextTypes.DEFAULT_TYP
 
     db_data = get_barname_data(barname)
     if not db_data.get("created_at"):
-        db_data["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        db_data["created_at"] = now_str()
     db_data["driver_id"] = update.effective_user.id
     db_data["driver_name"] = update.effective_user.full_name
     db_data["documents"] = session_docs
-    db_data["completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    db_data["completed_at"] = now_str()
     db_data["status"] = "completed"
     add_barname_log(
         db_data, "ارسال نهایی مستندات",
@@ -795,7 +827,7 @@ async def dispatch_review_package(context, barname: str, db_data: dict) -> str:
                 package_text = (
                     f"📦 مستندات بارنامه شماره `{barname}` توسط آیدی {driver_link} ارسال شد\n\n"
                     f"📄 تعداد مستندات: {len(docs)}\n"
-                    f"🕐 زمان: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+                    f"🕐 زمان: {now_str()}\n\n"
                     "برای مشاهده‌ی مجدد مستندات این بارنامه، دکمه‌ی «📦 نمایش مجدد مستندات» زیر همین پیام را بزنید.\n\n"
                     "لطفاً بررسی و اقدام کنید:"
                 )
@@ -878,7 +910,7 @@ async def review_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     db_data["review"]["status"] = "approved"
     db_data["review"]["reviewed_by"] = user.id
-    db_data["review"]["reviewed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    db_data["review"]["reviewed_at"] = now_str()
     add_barname_log(db_data, "تایید مستندات", actor=f"{user.first_name} (ادمین، از طریق ربات)")
     save_barname_data(barname, db_data)
 
@@ -922,7 +954,7 @@ async def review_finalize(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     db_data["review"]["status"] = "approved"
     db_data["review"]["reviewed_by"] = user.id
-    db_data["review"]["reviewed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    db_data["review"]["reviewed_at"] = now_str()
     add_barname_log(
         db_data, "تایید نهایی بارنامه (پس از کسری بار)",
         actor=f"{user.first_name} (ادمین، از طریق ربات)",
@@ -1183,7 +1215,7 @@ async def admin_list_barnames(update: Update, context: ContextTypes.DEFAULT_TYPE
 def build_approved_list_content():
     """متن و کیبورد لیست بارنامه‌های تایید شده در ۵ روز اخیر"""
     db = load_db()
-    cutoff = datetime.now() - timedelta(days=5)
+    cutoff = now_tehran() - timedelta(days=5)
     rows = []
     for barname, data in db.items():
         review = data.get("review", {})
@@ -1446,7 +1478,7 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         db_data["review"]["reviewed_by"] = user.id
-        db_data["review"]["reviewed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        db_data["review"]["reviewed_at"] = now_str()
         driver_id = db_data.get("driver_id")
 
         if r_action == "reject":
@@ -1501,8 +1533,8 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     await context.bot.send_message(
                         chat_id=driver_id,
                         text=(
-                            f"⚠️ راننده محترم طبق بررسی حواله و رسید ارسالی مقدار {note_text} "
-                            "کسری بار دارید که هزینه آن می‌بایست از مبلغ بارنامه کسر شود.\n\n"
+                            f"⚠️ راننده محترم طبق بررسی حواله و رسید ارسالی بارنامه شماره {barname}، "
+                            f"مقدار {note_text} کسری بار دارید که هزینه آن می‌بایست از مبلغ بارنامه کسر شود.\n\n"
                             "آیا این کسری بار مورد تایید شماست؟"
                         ),
                         reply_markup=driver_partial_response_keyboard(rid)
@@ -1669,7 +1701,7 @@ async def admin_attach_receive_file(update: Update, context: ContextTypes.DEFAUL
         "file_type": file_type,
         "caption": caption,
         "uploaded_by": f"{user.first_name} (ادمین)",
-        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "uploaded_at": now_str(),
     })
     add_barname_log(
         data, "افزودن عکس/فایل توسط ادمین",
@@ -1695,7 +1727,7 @@ async def reply_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_T
     is_admin = user.id in ADMIN_IDS
 
     # ─── دکمه‌های راننده ───
-    if text == "🚀 آپلود مستندات":
+    if text == "🚀 بارگزاری مدارک":
         await update.message.reply_text(
             "📝 لطفاً *شماره بارنامه* را وارد کنید:",
             parse_mode="Markdown",
@@ -1729,7 +1761,7 @@ async def reply_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_T
         if not rows:
             await update.message.reply_text(
                 "📭 شما تا الان هیچ بارنامه‌ای ثبت نکرده‌اید.\n"
-                "برای شروع دکمه 🚀 آپلود مستندات را بزنید.",
+                "برای شروع دکمه 🚀 بارگزاری مدارک را بزنید.",
                 reply_markup=driver_reply_keyboard()
             )
         else:
@@ -1881,7 +1913,7 @@ def _check_dashboard_token(token: str) -> str:
 
 def _require_admin_token(token: str) -> str:
     """فقط توکن ادمین را قبول می‌کند — برای endpointهایی که داده را تغییر می‌دهند
-    (تایید/رد/کسری/پیام/آپلود/نوع محصول). توکن مشاهده‌گر اینجا رد می‌شود."""
+    (تایید/رد/کسری/پیام/بارگزاری/نوع محصول). توکن مشاهده‌گر اینجا رد می‌شود."""
     role = _resolve_dashboard_role(token)
     if role != "admin":
         raise HTTPException(status_code=403, detail="این عملیات فقط برای ادمین مجاز است — شما فقط دسترسی مشاهده دارید.")
@@ -1937,6 +1969,62 @@ async def api_list_barnames(
     return rows
 
 
+@dashboard_api.get("/api/export/xlsx")
+async def api_export_xlsx(token: str = Query(default="")):
+    """خروجی اکسل کامل از همه‌ی بارنامه‌ها — برای گزارش‌گیری"""
+    _check_dashboard_token(token)
+    db = load_db()
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "بارنامه‌ها"
+    ws.sheet_view.rightToLeft = True
+
+    headers = [
+        "شماره بارنامه", "نام راننده", "آیدی راننده", "نوع محصول", "وضعیت",
+        "یادداشت کسری بار", "پاسخ راننده به کسری", "تعداد مدارک",
+        "تاریخ ثبت", "تاریخ ارسال نهایی", "اولین واکنش ادمین", "آخرین واکنش ادمین",
+    ]
+    ws.append(headers)
+
+    driver_response_labels = {"accepted": "پذیرفته", "rejected": "نپذیرفته"}
+
+    rows = sorted(db.items(), key=lambda x: x[1].get("created_at", "") or "", reverse=True)
+    for barname, data in rows:
+        review = data.get("review", {})
+        first_resp, last_resp = admin_response_times(data)
+        dr = review.get("driver_response")
+        dr_label = driver_response_labels.get(dr, "-")
+        ws.append([
+            barname,
+            data.get("driver_name", "-"),
+            data.get("driver_id", "-"),
+            data.get("product_type", "") or "-",
+            review_status_label(data),
+            review.get("deduction_note", "") or "-",
+            dr_label,
+            len(data.get("documents", {})),
+            data.get("created_at", "-") or "-",
+            data.get("completed_at", "-") or "-",
+            first_resp or "-",
+            last_resp or "-",
+        ])
+
+    widths = [16, 20, 14, 18, 26, 22, 16, 10, 16, 16, 16, 16]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    filename = f"pibar-report-{now_tehran().strftime('%Y%m%d-%H%M')}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+
 @dashboard_api.get("/api/barnames/{barname}")
 async def api_get_barname(barname: str, x_dashboard_token: str = Header(default="")):
     _check_dashboard_token(x_dashboard_token)
@@ -1954,6 +2042,7 @@ async def api_get_barname(barname: str, x_dashboard_token: str = Header(default=
             "uploaded_at": info.get("uploaded_at", ""),
         })
 
+    first_resp, last_resp = admin_response_times(data)
     return {
         "barname": barname,
         "driver_name": data.get("driver_name", "-"),
@@ -1965,6 +2054,8 @@ async def api_get_barname(barname: str, x_dashboard_token: str = Header(default=
         "documents": docs,
         "admin_attachments": data.get("admin_attachments", []),
         "product_type": data.get("product_type", ""),
+        "first_admin_response_at": first_resp,
+        "last_admin_response_at": last_resp,
         "log": data.get("log", []),
     }
 
@@ -2060,7 +2151,7 @@ async def api_upload_attachment(
     file: UploadFile = File(...),
     caption: str = Form(default=""),
 ):
-    """آپلود مستقیم عکس/فایل برای یک بارنامه از داخل داشبورد (بدون نیاز به چت با ربات)"""
+    """بارگزاری مستقیم عکس/فایل برای یک بارنامه از داخل داشبورد (بدون نیاز به چت با ربات)"""
     _require_admin_token(x_dashboard_token)
     data = get_barname_data(barname)
     if not data.get("created_at"):
@@ -2091,7 +2182,7 @@ async def api_upload_attachment(
         "file_type": file_type,
         "caption": (caption or "").strip(),
         "uploaded_by": "ادمین (از طریق داشبورد وب)",
-        "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "uploaded_at": now_str(),
     })
     add_barname_log(
         data, "افزودن عکس/فایل توسط ادمین",
@@ -2112,7 +2203,7 @@ async def api_approve(barname: str, x_dashboard_token: str = Header(default=""))
 
     review["status"] = "approved"
     review["reviewed_by"] = "dashboard"
-    review["reviewed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    review["reviewed_at"] = now_str()
     data["review"] = review
     if was_partial:
         resp = review.get("driver_response")
@@ -2168,7 +2259,7 @@ async def api_reject(barname: str, payload: dict = Body(...), x_dashboard_token:
     review["status"] = "rejected"
     review["reason"] = reason
     review["reviewed_by"] = "dashboard"
-    review["reviewed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    review["reviewed_at"] = now_str()
     data["review"] = review
     add_barname_log(data, "عدم تایید مستندات", actor="ادمین (از طریق داشبورد وب)", detail=reason)
     save_barname_data(barname, data)
@@ -2218,7 +2309,7 @@ async def api_partial(barname: str, payload: dict = Body(...), x_dashboard_token
     review["deduction_note"] = note
     review["driver_response"] = None
     review["reviewed_by"] = "dashboard"
-    review["reviewed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    review["reviewed_at"] = now_str()
     data["review"] = review
     add_barname_log(data, "تایید با کسری بار", actor="ادمین (از طریق داشبورد وب)", detail=note)
     save_barname_data(barname, data)
@@ -2229,8 +2320,8 @@ async def api_partial(barname: str, payload: dict = Body(...), x_dashboard_token
             await BOT_INSTANCE.send_message(
                 chat_id=driver_id,
                 text=(
-                    f"⚠️ راننده محترم طبق بررسی حواله و رسید ارسالی مقدار {note} "
-                    "کسری بار دارید که هزینه آن می‌بایست از مبلغ بارنامه کسر شود.\n\n"
+                    f"⚠️ راننده محترم طبق بررسی حواله و رسید ارسالی بارنامه شماره {barname}، "
+                    f"مقدار {note} کسری بار دارید که هزینه آن می‌بایست از مبلغ بارنامه کسر شود.\n\n"
                     "آیا این کسری بار مورد تایید شماست؟"
                 ),
                 reply_markup=driver_partial_response_keyboard(rid)
@@ -2337,18 +2428,18 @@ async def run_app():
             CommandHandler("start", start),
             CallbackQueryHandler(handle_start_upload, pattern="^start_upload$"),
             CallbackQueryHandler(resubmit_barname, pattern="^resubmit_"),
-            MessageHandler(filters.Regex("^🚀 آپلود مستندات$"), handle_start_upload_button),
+            MessageHandler(filters.Regex("^🚀 بارگزاری مدارک$"), handle_start_upload_button),
         ],
         states={
             WAIT_BARNAME: [
-                MessageHandler(filters.Regex("^(🚀 آپلود مستندات|📋 راهنما|📦 وضعیت بارنامه|❌ لغو عملیات|🔍 دریافت مستندات|📊 لیست بارنامه‌ها|📈 آمار کلی|🗑 حذف بارنامه|✅ بارنامه‌های تایید شده|🕐 نیازمند بررسی|🏠 منوی اصلی ادمین)$"), reply_keyboard_handler),
+                MessageHandler(filters.Regex("^(🚀 بارگزاری مدارک|📋 راهنما|📦 وضعیت بارنامه|❌ لغو عملیات|🔍 دریافت مستندات|📊 لیست بارنامه‌ها|📈 آمار کلی|🗑 حذف بارنامه|✅ بارنامه‌های تایید شده|🕐 نیازمند بررسی|🏠 منوی اصلی ادمین)$"), reply_keyboard_handler),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_barname),
                 CallbackQueryHandler(back_to_main, pattern="^back_to_main$"),
             ],
             WAIT_DOCS: [
                 MessageHandler(filters.Regex("^❌ لغو عملیات$"), cancel),
                 MessageHandler(filters.Regex("^✅ تایید نهایی تمامی مستندات و ارسال به شرکت$"), final_confirm_upload),
-                MessageHandler(filters.Regex("^(🚀 آپلود مستندات|📋 راهنما|📦 وضعیت بارنامه|🔍 دریافت مستندات|📊 لیست بارنامه‌ها|📈 آمار کلی|🗑 حذف بارنامه|✅ بارنامه‌های تایید شده|🕐 نیازمند بررسی|🏠 منوی اصلی ادمین)$"), reply_keyboard_handler),
+                MessageHandler(filters.Regex("^(🚀 بارگزاری مدارک|📋 راهنما|📦 وضعیت بارنامه|🔍 دریافت مستندات|📊 لیست بارنامه‌ها|📈 آمار کلی|🗑 حذف بارنامه|✅ بارنامه‌های تایید شده|🕐 نیازمند بررسی|🏠 منوی اصلی ادمین)$"), reply_keyboard_handler),
                 MessageHandler(filters.PHOTO | filters.Document.ALL, receive_upload_item),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_upload_item),
                 CallbackQueryHandler(back_to_main, pattern="^back_to_main$"),
@@ -2391,7 +2482,7 @@ async def run_app():
     # افزودن عکس/فایل توسط ادمین به یک بارنامه (خارج از فلوی مکالمه‌ی راننده)
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, admin_attach_receive_file))
     # هندلر دکمه‌های منوی Reply (باید قبل از admin_text_handler باشه)
-    reply_kb_filter = filters.Regex("^(🚀 آپلود مستندات|📋 راهنما|📦 وضعیت بارنامه|❌ لغو عملیات|🔍 دریافت مستندات|📊 لیست بارنامه‌ها|📈 آمار کلی|🗑 حذف بارنامه|📎 افزودن عکس/فایل|✅ بارنامه‌های تایید شده|🕐 نیازمند بررسی|🏠 منوی اصلی ادمین)$")
+    reply_kb_filter = filters.Regex("^(🚀 بارگزاری مدارک|📋 راهنما|📦 وضعیت بارنامه|❌ لغو عملیات|🔍 دریافت مستندات|📊 لیست بارنامه‌ها|📈 آمار کلی|🗑 حذف بارنامه|📎 افزودن عکس/فایل|✅ بارنامه‌های تایید شده|🕐 نیازمند بررسی|🏠 منوی اصلی ادمین)$")
     app.add_handler(MessageHandler(reply_kb_filter, reply_keyboard_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler))
 
