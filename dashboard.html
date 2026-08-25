@@ -132,8 +132,11 @@
 
 <div id="app" style="display:none;">
   <header>
-    <h1>📦 داشبورد بارنامه‌ها</h1>
-    <button class="btn-ghost" onclick="logout()">خروج</button>
+    <h1>📦 داشبورد بارنامه‌ها <span id="roleBadge" class="badge badge-none" style="margin-right:8px; font-size:11px; vertical-align:middle;"></span></h1>
+    <div style="display:flex; gap:8px;">
+      <button class="btn-ghost" onclick="exportExcel()">📥 خروجی اکسل</button>
+      <button class="btn-ghost" onclick="logout()">خروج</button>
+    </div>
   </header>
 
   <div style="padding:20px; max-width:1100px; margin:0 auto;">
@@ -172,6 +175,7 @@
 
 <script>
 let TOKEN = localStorage.getItem('pibar_token') || '';
+let ROLE = '';
 let currentStatus = 'all';
 let currentBarname = null;
 let debounceTimer = null;
@@ -236,13 +240,27 @@ function doLogin() {
 function logout() {
   localStorage.removeItem('pibar_token');
   TOKEN = '';
+  ROLE = '';
   document.getElementById('app').style.display = 'none';
   document.getElementById('loginBox').style.display = 'block';
 }
 
+function exportExcel() {
+  window.open(`/api/export/xlsx?token=${encodeURIComponent(TOKEN)}`, '_blank');
+}
+
 async function checkAndEnter() {
   try {
-    await apiFetch('/api/barnames?status=all');
+    const who = await apiFetch('/api/whoami');
+    ROLE = who.role || 'viewer';
+    const badge = document.getElementById('roleBadge');
+    if (ROLE === 'admin') {
+      badge.textContent = '👑 دسترسی کامل';
+      badge.className = 'badge badge-approved';
+    } else {
+      badge.textContent = '👁️ فقط مشاهده';
+      badge.className = 'badge badge-pending';
+    }
     document.getElementById('loginBox').style.display = 'none';
     document.getElementById('app').style.display = 'block';
     renderTabs();
@@ -378,13 +396,14 @@ function logItemHtml(item) {
 function renderDetail(data) {
   const review = data.review || {};
   const status = review.status || 'none';
+  const isAdmin = ROLE === 'admin';
 
   const docsHtml = (data.documents || []).map(d => docCardHtml(data.barname, d)).join('');
   const attachmentsHtml = (data.admin_attachments || []).map(a => attachmentCardHtml(data.barname, a)).join('');
 
   let actionsHtml = '';
   if (status === 'pending') {
-    actionsHtml = `
+    actionsHtml = isAdmin ? `
       <div class="action-row">
         <button class="btn-green" onclick="doApprove()">✅ تایید</button>
         <button class="btn-red" onclick="toggleForm('rejectForm')">❌ عدم تایید</button>
@@ -398,7 +417,7 @@ function renderDetail(data) {
         <textarea id="partialNote" placeholder="مقدار کسری بار را بنویسید (مثلاً: ۲ تن)..."></textarea>
         <button class="btn-orange" onclick="doPartial()">ارسال تایید با کسری بار</button>
       </div>
-    `;
+    ` : `<p class="info-line">🕐 این بارنامه در انتظار بررسی ادمین است. (شما فقط دسترسی مشاهده دارید)</p>`;
   } else if (status === 'partial') {
     const dr = review.driver_response;
     let driverNote = '🕐 راننده هنوز به کسری بار پاسخ نداده است.';
@@ -407,10 +426,12 @@ function renderDetail(data) {
     actionsHtml = `
       <p class="info-line"><b>مقدار کسری اعلام‌شده:</b> ${escapeHtml(review.deduction_note || '-')}</p>
       <p class="info-line">${driverNote}</p>
+      ${isAdmin ? `
       <div class="action-row">
         <button class="btn-green" onclick="doApprove()">✅ تایید نهایی بارنامه</button>
       </div>
       <p class="info-line" style="color:var(--muted); font-size:12px;">تا زدن این دکمه، بارنامه «تایید شده» محسوب نمی‌شود و مبلغی واریز نخواهد شد.</p>
+      ` : `<p class="info-line">👁️ فقط دسترسی مشاهده دارید — تایید نهایی فقط با ادمین است.</p>`}
     `;
   } else {
     actionsHtml = `<p class="info-line">این بارنامه قبلاً بررسی شده و دیگر قابل تغییر از این بخش نیست.</p>`;
@@ -423,31 +444,45 @@ function renderDetail(data) {
     ? `<div class="timeline">${logItems.map(logItemHtml).join('')}</div>`
     : `<p class="no-log">هنوز رویدادی برای این بارنامه ثبت نشده.</p>`;
 
-  document.getElementById('detailContent').innerHTML = `
-    <h2>📦 بارنامه ${escapeHtml(data.barname)} <span class="badge ${BADGE_CLASS[status] || 'badge-none'}">${escapeHtml(data.status_label)}</span></h2>
-    <div class="info-line">👤 راننده: <b>${escapeHtml(data.driver_name || '-')}</b> (آیدی: ${escapeHtml(data.driver_id || '-')})</div>
-    <div class="info-line">🕐 تاریخ ثبت: ${escapeHtml(data.created_at || '-')}</div>
-    ${data.completed_at ? `<div class="info-line">📤 تاریخ ارسال نهایی: ${escapeHtml(data.completed_at)}</div>` : ''}
+  const productTypeHtml = isAdmin ? `
     <div class="msgbox" style="border-top:none; padding-top:0; margin-top:12px;">
       <div class="info-line" style="margin-bottom:6px;">🌾 نوع محصول</div>
       <input type="text" id="productTypeInput" placeholder="مثلاً: برنج ایرانی، برنج خارجی، شکر، آرد و ..." value="${escapeHtml(data.product_type || '')}" style="width:100%; margin-bottom:8px;">
       <button class="btn-primary" onclick="saveProductType()">ذخیره نوع محصول</button>
     </div>
-    <div class="doc-grid">${docsHtml || '<p class="info-line">مستندی یافت نشد</p>'}</div>
-    ${actionsHtml}
-    <div class="section-title">📎 عکس/فایل‌های افزوده‌شده توسط ادمین</div>
-    <div class="doc-grid">${attachmentsHtml || '<p class="info-line">هنوز چیزی اضافه نشده.</p>'}</div>
+  ` : `<div class="info-line" style="margin-top:12px;">🌾 نوع محصول: <b>${escapeHtml(data.product_type || '-')}</b></div>`;
+
+  const attachmentUploadHtml = isAdmin ? `
     <div class="msgbox">
       <div class="info-line" style="margin-bottom:6px;">📎 افزودن عکس/فایل جدید به این بارنامه</div>
       <input type="file" id="attachmentFile" style="margin-bottom:8px; width:100%;">
       <input type="text" id="attachmentCaption" placeholder="توضیح کوتاه (اختیاری)" style="margin-bottom:8px; width:100%;">
       <button class="btn-primary" onclick="doUploadAttachment()">آپلود</button>
     </div>
+  ` : '';
+
+  const freeMessageHtml = isAdmin ? `
     <div class="msgbox">
       <div class="info-line" style="margin-bottom:6px;">✉️ ارسال پیام آزاد به راننده</div>
       <textarea id="freeMessage" placeholder="متن پیام..."></textarea>
       <button class="btn-primary" onclick="sendFreeMessage()">ارسال پیام</button>
     </div>
+  ` : '';
+
+  document.getElementById('detailContent').innerHTML = `
+    <h2>📦 بارنامه ${escapeHtml(data.barname)} <span class="badge ${BADGE_CLASS[status] || 'badge-none'}">${escapeHtml(data.status_label)}</span></h2>
+    <div class="info-line">👤 راننده: <b>${escapeHtml(data.driver_name || '-')}</b> (آیدی: ${escapeHtml(data.driver_id || '-')})</div>
+    <div class="info-line">🕐 تاریخ ثبت: ${escapeHtml(data.created_at || '-')}</div>
+    ${data.completed_at ? `<div class="info-line">📤 تاریخ ارسال نهایی: ${escapeHtml(data.completed_at)}</div>` : ''}
+    ${data.first_admin_response_at ? `<div class="info-line">🕐 اولین واکنش ادمین: ${escapeHtml(data.first_admin_response_at)}</div>` : ''}
+    ${data.last_admin_response_at ? `<div class="info-line">🕐 آخرین واکنش ادمین: ${escapeHtml(data.last_admin_response_at)}</div>` : ''}
+    ${productTypeHtml}
+    <div class="doc-grid">${docsHtml || '<p class="info-line">مستندی یافت نشد</p>'}</div>
+    ${actionsHtml}
+    <div class="section-title">📎 عکس/فایل‌های افزوده‌شده توسط ادمین</div>
+    <div class="doc-grid">${attachmentsHtml || '<p class="info-line">هنوز چیزی اضافه نشده.</p>'}</div>
+    ${attachmentUploadHtml}
+    ${freeMessageHtml}
     <div class="section-title">📜 تاریخچه بارنامه</div>
     ${logHtml}
   `;
