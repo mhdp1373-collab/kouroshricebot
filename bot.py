@@ -1953,6 +1953,7 @@ async def api_list_barnames(
         st = review.get("status") or "none"
         if status != "all" and st != status:
             continue
+        first_resp, last_resp = admin_response_times(data)
         rows.append({
             "barname": bn,
             "driver_name": data.get("driver_name", "-"),
@@ -1964,6 +1965,8 @@ async def api_list_barnames(
             "reviewed_at": review.get("reviewed_at"),
             "deduction_note": review.get("deduction_note", ""),
             "product_type": data.get("product_type", ""),
+            "first_admin_response_at": first_resp,
+            "last_admin_response_at": last_resp,
         })
     rows.sort(key=lambda r: r["created_at"] or "", reverse=True)
     return rows
