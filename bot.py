@@ -544,13 +544,23 @@ async def resubmit_barname(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
         return ConversationHandler.END
 
+    # مدارک قبلی حفظ می‌شوند و با مدارک جدید ادغام می‌شوند — پاک نمی‌شوند
     context.user_data.clear()
     context.user_data["barname"] = barname
-    context.user_data["session_documents"] = {}
-    context.user_data["doc_counter"] = 0
+    prev_docs = dict(existing.get("documents", {}))
+    context.user_data["session_documents"] = prev_docs
+    existing_nums = [
+        int(k.split("_", 1)[1]) for k in prev_docs
+        if k.startswith("doc_") and k.split("_", 1)[1].isdigit()
+    ]
+    context.user_data["doc_counter"] = max(existing_nums) if existing_nums else 0
 
+    prev_count = len(prev_docs)
     await query.message.reply_text(
-        f"🔄 بارگذاری مجدد مستندات بارنامه *{barname}*\n\n{UPLOAD_REQUIREMENTS_TEXT}",
+        f"🔄 بارگذاری مجدد مدارک بارنامه *{barname}*\n\n"
+        f"✅ {prev_count} مدرکی که قبلاً فرستاده بودید همچنان نزد ما محفوظ است و پاک نشده.\n"
+        "فقط کافیست مدرکِ ناقص یا اصلاح‌شده را دوباره بفرستید — همراه با مدارک قبلی برای ادمین ارسال می‌شود.\n\n"
+        f"{UPLOAD_REQUIREMENTS_TEXT}",
         parse_mode="Markdown",
         reply_markup=upload_docs_keyboard()
     )
@@ -646,16 +656,40 @@ async def receive_barname(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return ConversationHandler.END
 
     context.user_data["barname"] = barname
-    context.user_data["session_documents"] = {}
-    context.user_data["doc_counter"] = 0
+    # اگر این بارنامه قبلاً مدارکی داشته (رد شده یا حتی هنوز در انتظار بررسی)، آن‌ها حفظ و با مدارک جدید ادغام می‌شوند
+    prev_docs = dict(existing.get("documents", {})) if existing_status in ("rejected", "pending") else {}
+    context.user_data["session_documents"] = prev_docs
+    existing_nums = [
+        int(k.split("_", 1)[1]) for k in prev_docs
+        if k.startswith("doc_") and k.split("_", 1)[1].isdigit()
+    ]
+    context.user_data["doc_counter"] = max(existing_nums) if existing_nums else 0
 
-    await update.message.reply_text(
-        f"✅ بارنامه *{barname}* ثبت شد.\n\n{UPLOAD_REQUIREMENTS_TEXT}",
-        parse_mode="Markdown",
-        reply_markup=upload_docs_keyboard()
-    )
+    if prev_docs:
+        await update.message.reply_text(
+            f"🔄 بارنامه *{barname}* شناسایی شد.\n\n"
+            f"✅ {len(prev_docs)} مدرکی که قبلاً برای این بارنامه فرستاده بودید همچنان نزد ما محفوظ است.\n"
+            "فقط کافیست مدرکِ ناقص یا اصلاح‌شده را دوباره بفرستید.\n\n"
+            f"{UPLOAD_REQUIREMENTS_TEXT}",
+            parse_mode="Markdown",
+            reply_markup=upload_docs_keyboard()
+        )
+    else:
+        await update.message.reply_text(
+            f"✅ بارنامه *{barname}* ثبت شد.\n\n{UPLOAD_REQUIREMENTS_TEXT}",
+            parse_mode="Markdown",
+            reply_markup=upload_docs_keyboard()
+        )
     _schedule_upload_reminder(context, update.effective_chat.id, barname)
     return WAIT_DOCS
+
+
+def upload_ack_inline_keyboard() -> InlineKeyboardMarkup:
+    """دکمه‌های زیر پیام «دریافت شد» — تا راننده همیشه یک اقدام واضح جلوی چشمش داشته باشد"""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ تایید نهایی و ارسال به شرکت", callback_data="upload_finalize_inline")],
+        [InlineKeyboardButton("❌ لغو ارسال", callback_data="upload_cancel_inline")],
+    ])
 
 
 async def receive_upload_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -691,8 +725,12 @@ async def receive_upload_item(update: Update, context: ContextTypes.DEFAULT_TYPE
         }
         count = sum(1 for k in session_docs if k.startswith("doc_"))
         await update.message.reply_text(
-            f"✅ دریافت شد. (مجموع مدارک ارسالی تا الان: {count})\n\n"
-            "اگر مدرک دیگری دارید بفرستید، یا اگر همه‌چیز کامل است دکمه‌ی «✅ تایید نهایی...» پایین صفحه را بزنید."
+            f"📥 مدرک شماره {n} دریافت شد. (مجموع مدارک ارسالی: {count})\n\n"
+            "⚠️ *هنوز چیزی برای شرکت ارسال نشده است.*\n"
+            "اگر مدرک دیگری دارید همین الان بفرستید. وقتی همه‌ی مدارک کامل شد، حتماً "
+            "«✅ تایید نهایی» را بزنید — تا آن را نزنید، مدارک شما اصلاً ارسال نمی‌شود.",
+            parse_mode="Markdown",
+            reply_markup=upload_ack_inline_keyboard()
         )
     elif text and text.strip():
         session_docs["account"] = {
@@ -703,9 +741,12 @@ async def receive_upload_item(update: Update, context: ContextTypes.DEFAULT_TYPE
             "uploaded_at": now_str(),
         }
         await update.message.reply_text(
-            f"✅ شماره حساب/شبا دریافت شد:\n`{text.strip()}`\n\n"
-            "اگر مدرک دیگری دارید بفرستید، یا اگر همه‌چیز کامل است دکمه‌ی «✅ تایید نهایی...» پایین صفحه را بزنید.",
-            parse_mode="Markdown"
+            f"📥 شماره حساب/شبا دریافت شد:\n`{text.strip()}`\n\n"
+            "⚠️ *هنوز چیزی برای شرکت ارسال نشده است.*\n"
+            "اگر مدرک دیگری دارید همین الان بفرستید. وقتی همه‌ی مدارک کامل شد، حتماً "
+            "«✅ تایید نهایی» را بزنید — تا آن را نزنید، مدارک شما اصلاً ارسال نمی‌شود.",
+            parse_mode="Markdown",
+            reply_markup=upload_ack_inline_keyboard()
         )
     else:
         await update.message.reply_text("⚠️ لطفاً فقط عکس، فایل یا شماره حساب/شبا ارسال کنید.")
@@ -715,9 +756,40 @@ async def receive_upload_item(update: Update, context: ContextTypes.DEFAULT_TYPE
     return WAIT_DOCS
 
 
+async def _do_final_confirm_upload(context, chat_id: int, user, barname: str, session_docs: dict):
+    """منطق مشترک ثبت نهایی — چه از دکمه‌ی پایین صفحه صدا زده شود، چه از دکمه‌ی شیشه‌ای زیر پیام"""
+    _cancel_upload_reminder(context, chat_id)
+
+    db_data = get_barname_data(barname)
+    if not db_data.get("created_at"):
+        db_data["created_at"] = now_str()
+    db_data["driver_id"] = user.id
+    db_data["driver_name"] = user.full_name
+    db_data["documents"] = session_docs
+    db_data["completed_at"] = now_str()
+    db_data["status"] = "completed"
+    add_barname_log(
+        db_data, "ارسال نهایی مستندات",
+        actor=f"{user.full_name} (راننده)",
+        detail=f"{len(session_docs)} مدرک ارسال شد"
+    )
+    save_barname_data(barname, db_data)
+
+    if STORAGE_CHANNEL_ID and str(STORAGE_CHANNEL_ID) not in [str(a) for a in ADMIN_IDS]:
+        for doc_key, doc_info in session_docs.items():
+            try:
+                await send_single_doc(
+                    context.bot, STORAGE_CHANNEL_ID, doc_key, doc_info, barname,
+                    extra_caption=f"👤 راننده: {user.full_name}"
+                )
+            except Exception as e:
+                logger.error(f"خطا در فوروارد به کانال آرشیو: {e}")
+
+    await dispatch_review_package(context, barname, db_data)
+
+
 async def final_confirm_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """دکمه‌ی «✅ تایید نهایی تمامی مستندات و ارسال به شرکت» — فقط از همین نقطه به بعد،
-    مستندات در دیتابیس ذخیره و برای ادمین ارسال می‌شوند"""
+    """دکمه‌ی «✅ تایید نهایی تمامی مستندات و ارسال به شرکت» از پنل پایین صفحه"""
     barname = context.user_data.get("barname")
     session_docs = context.user_data.get("session_documents", {})
 
@@ -734,43 +806,60 @@ async def final_confirm_upload(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return WAIT_DOCS
 
-    _cancel_upload_reminder(context, update.effective_chat.id)
-
-    db_data = get_barname_data(barname)
-    if not db_data.get("created_at"):
-        db_data["created_at"] = now_str()
-    db_data["driver_id"] = update.effective_user.id
-    db_data["driver_name"] = update.effective_user.full_name
-    db_data["documents"] = session_docs
-    db_data["completed_at"] = now_str()
-    db_data["status"] = "completed"
-    add_barname_log(
-        db_data, "ارسال نهایی مستندات",
-        actor=f"{update.effective_user.full_name} (راننده)",
-        detail=f"{len(session_docs)} مدرک ارسال شد"
-    )
-    save_barname_data(barname, db_data)
-
-    # فوروارد به کانال آرشیو (در صورت تنظیم)
-    if STORAGE_CHANNEL_ID and str(STORAGE_CHANNEL_ID) not in [str(a) for a in ADMIN_IDS]:
-        for doc_key, doc_info in session_docs.items():
-            try:
-                await send_single_doc(
-                    context.bot, STORAGE_CHANNEL_ID, doc_key, doc_info, barname,
-                    extra_caption=f"👤 راننده: {update.effective_user.full_name}"
-                )
-            except Exception as e:
-                logger.error(f"خطا در فوروارد به کانال آرشیو: {e}")
+    await _do_final_confirm_upload(context, update.effective_chat.id, update.effective_user, barname, session_docs)
 
     await update.message.reply_text(
-        f"✅ *مستندات بارنامه {barname} با موفقیت برای شرکت ارسال شد.*\n\n"
+        f"✅ *مدارک بارنامه {barname} با موفقیت برای شرکت ارسال شد.*\n\n"
         "نتیجه‌ی بررسی به‌زودی از طریق همین ربات به شما اطلاع داده خواهد شد.",
         parse_mode="Markdown",
         reply_markup=driver_reply_keyboard()
     )
-
-    await dispatch_review_package(context, barname, db_data)
     context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def final_confirm_upload_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """همان تایید نهایی، از دکمه‌ی شیشه‌ای زیر پیام «دریافت شد»"""
+    query = update.callback_query
+    barname = context.user_data.get("barname")
+    session_docs = context.user_data.get("session_documents", {})
+
+    if not barname or not session_docs:
+        await query.answer("⚠️ هنوز مدرکی ثبت نشده است.", show_alert=True)
+        return WAIT_DOCS
+
+    await query.answer("در حال ارسال...")
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    await _do_final_confirm_upload(context, query.message.chat_id, query.from_user, barname, session_docs)
+
+    await query.message.reply_text(
+        f"✅ *مدارک بارنامه {barname} با موفقیت برای شرکت ارسال شد.*\n\n"
+        "نتیجه‌ی بررسی به‌زودی از طریق همین ربات به شما اطلاع داده خواهد شد.",
+        parse_mode="Markdown",
+        reply_markup=driver_reply_keyboard()
+    )
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def cancel_upload_inline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """دکمه‌ی «❌ لغو ارسال» زیر پیام «دریافت شد»"""
+    query = update.callback_query
+    await query.answer()
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    _cancel_upload_reminder(context, query.message.chat_id)
+    context.user_data.clear()
+    await query.message.reply_text(
+        "❌ عملیات لغو شد.\n\nبرای شروع مجدد از منوی پایین صفحه استفاده کنید:",
+        reply_markup=driver_reply_keyboard()
+    )
     return ConversationHandler.END
 
 
@@ -2442,6 +2531,8 @@ async def run_app():
             WAIT_DOCS: [
                 MessageHandler(filters.Regex("^❌ لغو عملیات$"), cancel),
                 MessageHandler(filters.Regex("^✅ تایید نهایی تمامی مستندات و ارسال به شرکت$"), final_confirm_upload),
+                CallbackQueryHandler(final_confirm_upload_inline, pattern="^upload_finalize_inline$"),
+                CallbackQueryHandler(cancel_upload_inline, pattern="^upload_cancel_inline$"),
                 MessageHandler(filters.Regex("^(🚀 بارگزاری مدارک|📋 راهنما|📦 وضعیت بارنامه|🔍 دریافت مستندات|📊 لیست بارنامه‌ها|📈 آمار کلی|🗑 حذف بارنامه|✅ بارنامه‌های تایید شده|🕐 نیازمند بررسی|🏠 منوی اصلی ادمین)$"), reply_keyboard_handler),
                 MessageHandler(filters.PHOTO | filters.Document.ALL, receive_upload_item),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_upload_item),
