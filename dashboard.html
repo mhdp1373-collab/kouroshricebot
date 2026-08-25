@@ -154,7 +154,7 @@
       <table>
         <thead>
           <tr>
-            <th>وضعیت</th><th>شماره بارنامه</th><th>راننده</th><th>نوع محصول</th><th>یادداشت کسری</th><th>مستندات</th><th>تاریخ ثبت</th>
+            <th>وضعیت</th><th>شماره بارنامه</th><th>راننده</th><th>نوع محصول</th><th>یادداشت کسری</th><th>مستندات</th><th>تاریخ ثبت</th><th>اولین واکنش ادمین</th><th>آخرین واکنش ادمین</th>
           </tr>
         </thead>
         <tbody id="listBody"></tbody>
@@ -334,7 +334,9 @@ function renderList(rows) {
       <td data-label="نوع محصول">${r.product_type ? escapeHtml(r.product_type) : '<span style="color:var(--muted);">—</span>'}</td>
       <td data-label="یادداشت کسری">${r.deduction_note ? '⚠️ با کسری تایید شده — ' + escapeHtml(r.deduction_note) : '<span style="color:var(--muted);">—</span>'}</td>
       <td data-label="مستندات">${r.doc_count}</td>
-      <td data-label="تاریخ">${escapeHtml(r.created_at || '-')}</td>
+      <td data-label="تاریخ">${toJalaliDisplay(r.created_at)}</td>
+      <td data-label="اولین واکنش ادمین">${toJalaliDisplay(r.first_admin_response_at)}</td>
+      <td data-label="آخرین واکنش ادمین">${toJalaliDisplay(r.last_admin_response_at)}</td>
     `;
     body.appendChild(tr);
   });
@@ -364,6 +366,42 @@ function escapeHtml(s) {
   return d.innerHTML;
 }
 
+// ── تبدیل تاریخ میلادی به شمسی (بدون نیاز به کتابخانه‌ی خارجی) ──
+function gregorianToJalali(gy, gm, gd) {
+  const g_days_in_month = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  const gy2 = (gm > 2) ? (gy + 1) : gy;
+  let days = 355666 + (365 * gy) + Math.floor((gy2 + 3) / 4) - Math.floor((gy2 + 99) / 100) +
+    Math.floor((gy2 + 399) / 400) + gd + g_days_in_month.slice(0, gm - 1).reduce((a, b) => a + b, 0);
+  let jy = -1595 + (33 * Math.floor(days / 12053));
+  days %= 12053;
+  jy += 4 * Math.floor(days / 1461);
+  days %= 1461;
+  if (days > 365) {
+    jy += Math.floor((days - 1) / 365);
+    days = (days - 1) % 365;
+  }
+  let jm, jd;
+  if (days < 186) {
+    jm = 1 + Math.floor(days / 31);
+    jd = 1 + (days % 31);
+  } else {
+    jm = 7 + Math.floor((days - 186) / 30);
+    jd = 1 + ((days - 186) % 30);
+  }
+  return [jy, jm, jd];
+}
+
+function toJalaliDisplay(dateStr) {
+  if (!dateStr || dateStr === '-') return '<span style="color:var(--muted);">—</span>';
+  const m = String(dateStr).match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?/);
+  if (!m) return escapeHtml(dateStr);
+  const [, gy, gm, gd, hh, mi] = m;
+  const [jy, jm, jd] = gregorianToJalali(+gy, +gm, +gd);
+  let out = `${jy}/${String(jm).padStart(2, '0')}/${String(jd).padStart(2, '0')}`;
+  if (hh !== undefined) out += ` ${hh}:${mi}`;
+  return escapeHtml(out);
+}
+
 function docCardHtml(barname, d) {
   if (d.file_type === 'text') {
     return `<div class="doc-card"><div class="doc-text">${escapeHtml(d.text || '-')}</div><div class="doc-label">${escapeHtml(d.label)}</div></div>`;
@@ -380,16 +418,16 @@ function attachmentCardHtml(barname, a) {
   const who = escapeHtml(a.uploaded_by || 'ادمین');
   const cap = a.caption ? `<br>${escapeHtml(a.caption)}` : '';
   if (a.file_type === 'photo') {
-    return `<div class="doc-card"><img src="${url}" loading="lazy" onclick="window.open('${url}','_blank')"><div class="doc-label">📎 ${who}<br>${escapeHtml(a.uploaded_at || '')}${cap}</div></div>`;
+    return `<div class="doc-card"><img src="${url}" loading="lazy" onclick="window.open('${url}','_blank')"><div class="doc-label">📎 ${who}<br>${toJalaliDisplay(a.uploaded_at)}${cap}</div></div>`;
   }
-  return `<div class="doc-card"><a href="${url}" target="_blank" style="text-decoration:none; color:inherit;"><div class="doc-file">📄</div></a><div class="doc-label">📎 ${who}<br>${escapeHtml(a.uploaded_at || '')}${cap}</div></div>`;
+  return `<div class="doc-card"><a href="${url}" target="_blank" style="text-decoration:none; color:inherit;"><div class="doc-file">📄</div></a><div class="doc-label">📎 ${who}<br>${toJalaliDisplay(a.uploaded_at)}${cap}</div></div>`;
 }
 
 function logItemHtml(item) {
   const event = escapeHtml(item.event || '');
   const actor = escapeHtml(item.actor || '');
   const detail = item.detail ? ` — ${escapeHtml(item.detail)}` : '';
-  const time = escapeHtml(item.time || item.at || '');
+  const time = toJalaliDisplay(item.time || item.at || '');
   return `<div class="timeline-item"><div class="ev">${event}</div><div class="meta">${actor}${detail} ${time ? '· ' + time : ''}</div></div>`;
 }
 
@@ -472,10 +510,10 @@ function renderDetail(data) {
   document.getElementById('detailContent').innerHTML = `
     <h2>📦 بارنامه ${escapeHtml(data.barname)} <span class="badge ${BADGE_CLASS[status] || 'badge-none'}">${escapeHtml(data.status_label)}</span></h2>
     <div class="info-line">👤 راننده: <b>${escapeHtml(data.driver_name || '-')}</b> (آیدی: ${escapeHtml(data.driver_id || '-')})</div>
-    <div class="info-line">🕐 تاریخ ثبت: ${escapeHtml(data.created_at || '-')}</div>
-    ${data.completed_at ? `<div class="info-line">📤 تاریخ ارسال نهایی: ${escapeHtml(data.completed_at)}</div>` : ''}
-    ${data.first_admin_response_at ? `<div class="info-line">🕐 اولین واکنش ادمین: ${escapeHtml(data.first_admin_response_at)}</div>` : ''}
-    ${data.last_admin_response_at ? `<div class="info-line">🕐 آخرین واکنش ادمین: ${escapeHtml(data.last_admin_response_at)}</div>` : ''}
+    <div class="info-line">🕐 تاریخ ثبت: ${toJalaliDisplay(data.created_at)}</div>
+    ${data.completed_at ? `<div class="info-line">📤 تاریخ ارسال نهایی: ${toJalaliDisplay(data.completed_at)}</div>` : ''}
+    ${data.first_admin_response_at ? `<div class="info-line">🕐 اولین واکنش ادمین: ${toJalaliDisplay(data.first_admin_response_at)}</div>` : ''}
+    ${data.last_admin_response_at ? `<div class="info-line">🕐 آخرین واکنش ادمین: ${toJalaliDisplay(data.last_admin_response_at)}</div>` : ''}
     ${productTypeHtml}
     <div class="doc-grid">${docsHtml || '<p class="info-line">مستندی یافت نشد</p>'}</div>
     ${actionsHtml}
