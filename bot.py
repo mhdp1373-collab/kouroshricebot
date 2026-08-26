@@ -24,6 +24,7 @@
 
 import os
 import io
+import re
 import json
 import uuid
 import hashlib
@@ -65,6 +66,44 @@ def now_tehran() -> datetime:
 def now_str(with_seconds: bool = False) -> str:
     fmt = "%Y-%m-%d %H:%M:%S" if with_seconds else "%Y-%m-%d %H:%M"
     return now_tehran().strftime(fmt)
+
+def _gregorian_to_jalali(gy: int, gm: int, gd: int):
+    """تبدیل تاریخ میلادی به شمسی (الگوریتم استاندارد، بدون نیاز به کتابخانه‌ی خارجی)"""
+    g_days_in_month = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    gy2 = gy + 1 if gm > 2 else gy
+    days = (
+        355666 + (365 * gy) + ((gy2 + 3) // 4) - ((gy2 + 99) // 100) + ((gy2 + 399) // 400)
+        + gd + sum(g_days_in_month[:gm - 1])
+    )
+    jy = -1595 + (33 * (days // 12053))
+    days %= 12053
+    jy += 4 * (days // 1461)
+    days %= 1461
+    if days > 365:
+        jy += (days - 1) // 365
+        days = (days - 1) % 365
+    if days < 186:
+        jm = 1 + days // 31
+        jd = 1 + (days % 31)
+    else:
+        jm = 7 + (days - 186) // 30
+        jd = 1 + ((days - 186) % 30)
+    return jy, jm, jd
+
+def to_jalali(date_str: str) -> str:
+    """رشته‌ی تاریخ ذخیره‌شده (میلادی، مثلاً «2026-08-25 14:30») را به نمایش شمسی تبدیل می‌کند.
+    برای نمایش تاریخ/ساعت به راننده و ادمین داخل خودِ ربات استفاده می‌شود."""
+    if not date_str or date_str == "-":
+        return date_str or "-"
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?", str(date_str))
+    if not m:
+        return date_str
+    gy, gm, gd, hh, mi = m.groups()
+    jy, jm, jd = _gregorian_to_jalali(int(gy), int(gm), int(gd))
+    out = f"{jy}/{jm:02d}/{jd:02d}"
+    if hh is not None:
+        out += f" {hh}:{mi}"
+    return out
 
 # ─── مسیر ذخیره‌سازی دائمی ───
 # روی Railway (و بیشتر PaaSها)، فضای پیش‌فرض کانتینر ephemeral است: با هر دیپلوی/ری‌استارت
@@ -155,14 +194,13 @@ def doc_label(key: str, doc_info: dict = None) -> str:
 
 # ─── متن یک‌جای راهنمای ارسال مستندات (فلوی ساده‌شده — بدون مرحله‌به‌مرحله) ───
 UPLOAD_REQUIREMENTS_TEXT = (
-    "📋 لطفاً موارد زیر را برای این بارنامه ارسال کنید:\n\n"
+    "📋 لطفاً موارد زیر را برای این بارنامه ارسال کنید؛ پس از ارسال همه‌ی مدارک، "
+    "دکمه‌ی «✅ تایید نهایی» را جهت ارسال به شرکت بزنید:\n\n"
     "📄 اصل بارنامه\n"
     "🔵 حواله خروج مبدأ (محل بارگیری)\n"
     "🔴 رسید تخلیه مقصد\n"
-    "💳 شماره حساب بانکی یا شماره شبا، به نام راننده یا شرکت باربری\n"
-    "   _(اگر شماره حساب فرد دیگری را می‌فرستید، رضایت‌نامه به همراه شماره ملی صاحب حساب را هم ارسال کنید)_\n\n"
-    "📌 لازم نیست به ترتیب خاصی ارسال کنید — هر عکس یا فایلی که آماده دارید همین الان بفرستید.\n"
-    "وقتی همه‌ی مدارک را فرستادید، دکمه‌ی «✅ تایید نهایی...» پایین صفحه را بزنید."
+    "💳 شماره حساب بانک تجارت (جهت پرداخت سریع‌تر) یا شماره شبا، به نام راننده یا شرکت باربری\n"
+    "   _(اگر شماره حساب فرد دیگری را می‌فرستید، رضایت‌نامه به همراه شماره ملی صاحب حساب را هم ارسال کنید)_"
 )
 
 # ─────────── پایگاه داده ───────────
@@ -209,6 +247,17 @@ def add_barname_log(data: dict, event: str, actor: str = "", detail: str = ""):
 def make_review_id() -> str:
     """شناسه یکتا برای هر درخواست بررسی (هر بار ارسال نهایی، شناسه جدید می‌گیرد)"""
     return uuid.uuid4().hex[:10]
+
+_PERSIAN_ARABIC_DIGITS = {
+    "۰": "0", "۱": "1", "۲": "2", "۳": "3", "۴": "4", "۵": "5", "۶": "6", "۷": "7", "۸": "8", "۹": "9",
+    "٠": "0", "١": "1", "٢": "2", "٣": "3", "٤": "4", "٥": "5", "٦": "6", "٧": "7", "٨": "8", "٩": "9",
+}
+
+def normalize_barname_digits(text: str) -> str:
+    """شماره بارنامه را فقط به رقم‌های انگلیسی تبدیل می‌کند — ارقام فارسی/عربی تبدیل و هر
+    کاراکتر غیرعددی (فاصله، خط تیره، حروف و ...) حذف می‌شود."""
+    converted = "".join(_PERSIAN_ARABIC_DIGITS.get(ch, ch) for ch in (text or ""))
+    return "".join(ch for ch in converted if ch.isdigit())
 
 def find_barname_by_review_id(rid: str):
     """پیدا کردن بارنامه بر اساس شناسه بررسی فعال آن"""
@@ -580,7 +629,7 @@ async def handle_show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "۱. 📄 اصل بارنامه\n"
         "۲. 🔵 حواله بار مبدأ\n"
         "۳. 🔴 رسید بار مقصد\n"
-        "۴. 💳 شماره حساب بانک تجارت یا شماره شبا (به نام راننده اول یا دوم بارنامه)\n\n"
+        "۴. 💳 شماره حساب بانک تجارت (جهت پرداخت سریع‌تر) یا شماره شبا (به نام راننده اول یا دوم بارنامه)\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "💡 *نکات مهم:*\n"
         "• عکس‌ها باید واضح و خوانا باشند\n"
@@ -606,11 +655,11 @@ async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
 
 async def receive_barname(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    barname = update.message.text.strip()
+    barname = normalize_barname_digits(update.message.text)
 
     if not barname or len(barname) < 3:
         await update.message.reply_text(
-            "⚠️ شماره بارنامه معتبر نیست.\nلطفاً دوباره وارد کنید:",
+            "⚠️ شماره بارنامه باید فقط عدد باشد (حداقل ۳ رقم).\nلطفاً دوباره وارد کنید:",
             reply_markup=barname_entry_keyboard()
         )
         return WAIT_BARNAME
@@ -720,13 +769,25 @@ async def receive_upload_item(update: Update, context: ContextTypes.DEFAULT_TYPE
     text = update.message.text
     chat_id = update.effective_chat.id
 
+    if doc and not photo:
+        # فقط PDF به‌عنوان «فایل» قابل قبول است — بقیه‌ی فرمت‌ها رد می‌شوند تا داشبورد بتواند نوعشان را درست تشخیص بدهد
+        mime = (doc.mime_type or "").lower()
+        fname = (doc.file_name or "").lower()
+        is_pdf = (mime == "application/pdf") or fname.endswith(".pdf")
+        if not is_pdf:
+            await update.message.reply_text(
+                "⚠️ فقط *عکس* یا فایل *PDF* قابل قبول است.\nلطفاً مدرک را به‌صورت عکس یا PDF ارسال کنید.",
+                parse_mode="Markdown"
+            )
+            return WAIT_DOCS
+
     if photo or doc:
         context.user_data["doc_counter"] = context.user_data.get("doc_counter", 0) + 1
         n = context.user_data["doc_counter"]
         if photo:
             file_id, file_type = photo.file_id, "photo"
         else:
-            file_id, file_type = doc.file_id, "document"
+            file_id, file_type = doc.file_id, "pdf"
 
         session_docs[f"doc_{n}"] = {
             "file_id": file_id,
@@ -765,7 +826,7 @@ async def receive_upload_item(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         context.user_data["last_ack_message_id"] = sent.message_id
     else:
-        await update.message.reply_text("⚠️ لطفاً فقط عکس، فایل یا شماره حساب/شبا ارسال کنید.")
+        await update.message.reply_text("⚠️ لطفاً فقط عکس، فایل PDF یا شماره حساب/شبا ارسال کنید.")
         return WAIT_DOCS
 
     _schedule_upload_reminder(context, chat_id, barname)
@@ -889,7 +950,7 @@ async def send_single_doc(bot, chat_id, doc_key: str, doc_info: dict, barname: s
     ftype = doc_info.get("file_type")
     if ftype == "photo":
         await bot.send_photo(chat_id=chat_id, photo=doc_info["file_id"], caption=caption, parse_mode=parse_mode)
-    elif ftype == "document":
+    elif ftype in ("document", "pdf"):
         await bot.send_document(chat_id=chat_id, document=doc_info["file_id"], caption=caption, parse_mode=parse_mode)
     else:
         await bot.send_message(chat_id=chat_id, text=f"{caption}\n\n📝 {doc_info.get('text', '-')}", parse_mode=parse_mode)
@@ -1303,7 +1364,7 @@ async def admin_list_barnames(update: Update, context: ContextTypes.DEFAULT_TYPE
     for barname, data in sorted(db.items(), key=lambda x: x[1].get("created_at", ""), reverse=True):
         status = review_status_label(data)
         doc_count = len(data.get("documents", {}))
-        created = data.get("created_at", "-")
+        created = to_jalali(data.get("created_at", "-"))
         lines.append(f"{status} | `{barname}` | {doc_count} مستند | {created}")
 
     text = "📊 *لیست بارنامه‌ها:*\n\n" + "\n".join(lines[:20])
@@ -1342,7 +1403,7 @@ def build_approved_list_content():
     for barname, data, reviewed_dt in rows:
         lines.append(
             f"✅ `{barname}` | راننده: {data.get('driver_name', '-')} | "
-            f"{reviewed_dt.strftime('%Y-%m-%d %H:%M')}"
+            f"{to_jalali(reviewed_dt.strftime('%Y-%m-%d %H:%M'))}"
         )
 
     text = "✅ *بارنامه‌های تایید شده (۵ روز اخیر):*\n\n" + "\n".join(lines[:30])
@@ -1674,7 +1735,7 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not action:
         return
 
-    barname = update.message.text.strip()
+    barname = normalize_barname_digits(update.message.text) or update.message.text.strip()
 
     # ─── حذف بارنامه ───
     if action == "delete_barname":
@@ -1736,7 +1797,7 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(
             f"📦 *بارنامه {barname}*\n"
             f"👤 راننده: {driver_link}\n"
-            f"📅 تاریخ: {db_data.get('created_at', '-')}\n"
+            f"📅 تاریخ: {to_jalali(db_data.get('created_at', '-'))}\n"
             f"📄 تعداد: {len(docs)} مستند\n"
             f"📌 وضعیت: {review_status_label(db_data)}\n\n"
             "در حال ارسال...",
@@ -1747,7 +1808,7 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             try:
                 await send_single_doc(
                     context.bot, user.id, doc_key, doc_info, barname,
-                    extra_caption=f"👤 فرستنده: {driver_link}\n🕐 {doc_info.get('uploaded_at', '-')}",
+                    extra_caption=f"👤 فرستنده: {driver_link}\n🕐 {to_jalali(doc_info.get('uploaded_at', '-'))}",
                     parse_mode="Markdown"
                 )
             except Exception as e:
@@ -1782,9 +1843,18 @@ async def admin_attach_receive_file(update: Update, context: ContextTypes.DEFAUL
     if photo:
         file_id, file_type = photo.file_id, "photo"
     elif doc:
-        file_id, file_type = doc.file_id, "document"
+        mime = (doc.mime_type or "").lower()
+        fname = (doc.file_name or "").lower()
+        is_pdf = (mime == "application/pdf") or fname.endswith(".pdf")
+        if not is_pdf:
+            await update.message.reply_text(
+                "⚠️ فقط *عکس* یا فایل *PDF* قابل قبول است.\nلطفاً به‌صورت عکس یا PDF ارسال کنید.",
+                parse_mode="Markdown"
+            )
+            return
+        file_id, file_type = doc.file_id, "pdf"
     else:
-        await update.message.reply_text("⚠️ لطفاً یک عکس یا فایل ارسال کنید.")
+        await update.message.reply_text("⚠️ لطفاً یک عکس یا فایل PDF ارسال کنید.")
         return
 
     data = get_barname_data(barname)
@@ -1848,7 +1918,7 @@ async def reply_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_T
             "۱. 📄 اصل بارنامه\n"
             "۲. 🔵 حواله خروج مبدأ (محل بارگیری)\n"
             "۳. 🔴 رسید تخلیه مقصد\n"
-            "۴. 💳 شماره حساب یا شماره شبا، به نام راننده یا شرکت باربری\n"
+            "۴. 💳 شماره حساب بانک تجارت (جهت پرداخت سریع‌تر) یا شماره شبا، به نام راننده یا شرکت باربری\n"
             "   (در صورت ارسال شماره حساب شخص دیگر، رضایت‌نامه به همراه شماره ملی صاحب حساب هم ارسال شود)\n\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             "💡 *نکات مهم:*\n"
@@ -1874,7 +1944,7 @@ async def reply_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_T
             for bn, data in rows[:20]:
                 doc_count = len(data.get("documents", {}))
                 status = review_status_label(data)
-                lines.append(f"{status} | `{bn}` | {doc_count} مدرک | {data.get('created_at', '-')}")
+                lines.append(f"{status} | `{bn}` | {doc_count} مدرک | {to_jalali(data.get('created_at', '-'))}")
 
             text_msg = "📦 *وضعیت بارنامه‌های شما:*\n\n" + "\n".join(lines)
             if len(rows) > 20:
@@ -1917,7 +1987,7 @@ async def reply_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_T
         lines = []
         for bn, data in sorted(db.items(), key=lambda x: x[1].get("created_at",""), reverse=True):
             status = review_status_label(data)
-            lines.append(f"{status} | `{bn}` | {len(data.get('documents',{}))} مستند | {data.get('created_at','-')}")
+            lines.append(f"{status} | `{bn}` | {len(data.get('documents',{}))} مستند | {to_jalali(data.get('created_at','-'))}")
         text_msg = "📊 *لیست بارنامه‌ها:*\n\n" + "\n".join(lines[:20])
         if len(db) > 20:
             text_msg += f"\n\n... و {len(db)-20} بارنامه دیگر"
@@ -2203,6 +2273,15 @@ async def api_get_barname_log(barname: str, x_dashboard_token: str = Header(defa
     return {"barname": barname, "count": len(log_sorted), "log": log_sorted}
 
 
+def _media_type_for(file_type: str) -> str:
+    """نوع MIME مناسب برای هر نوع مستند — تا مرورگر/داشبورد بتواند فرمت را درست تشخیص بدهد"""
+    if file_type == "photo":
+        return "image/jpeg"
+    if file_type == "pdf":
+        return "application/pdf"
+    return "application/octet-stream"
+
+
 @dashboard_api.get("/api/barnames/{barname}/doc/{doc_key}/file")
 async def api_get_doc_file(barname: str, doc_key: str, token: str = Query(default="")):
     _check_dashboard_token(token)
@@ -2217,7 +2296,7 @@ async def api_get_doc_file(barname: str, doc_key: str, token: str = Query(defaul
         file_bytes = await tg_file.download_as_bytearray()
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"خطا در دریافت فایل از بله: {e}")
-    media_type = "image/jpeg" if doc.get("file_type") == "photo" else "application/octet-stream"
+    media_type = _media_type_for(doc.get("file_type"))
     return StreamingResponse(io.BytesIO(bytes(file_bytes)), media_type=media_type)
 
 
@@ -2229,7 +2308,7 @@ async def api_get_attachment_file(barname: str, attachment_id: str, token: str =
     if not att:
         raise HTTPException(status_code=404, detail="پیوست یافت نشد.")
 
-    media_type = "image/jpeg" if att.get("file_type") == "photo" else "application/octet-stream"
+    media_type = _media_type_for(att.get("file_type"))
 
     if att.get("source") == "dashboard":
         file_path = os.path.join(DATA_DIR, "attachments", barname, att.get("filename", ""))
@@ -2272,7 +2351,13 @@ async def api_upload_attachment(
         raise HTTPException(status_code=413, detail="حجم فایل نباید بیشتر از ۲۰ مگابایت باشد.")
 
     content_type = (file.content_type or "").lower()
-    file_type = "photo" if content_type.startswith("image/") else "document"
+    fname_lower = (file.filename or "").lower()
+    if content_type.startswith("image/"):
+        file_type = "photo"
+    elif content_type == "application/pdf" or fname_lower.endswith(".pdf"):
+        file_type = "pdf"
+    else:
+        raise HTTPException(status_code=400, detail="فقط فایل تصویری یا PDF قابل قبول است.")
 
     att_id = uuid.uuid4().hex[:10]
     ext = os.path.splitext(file.filename or "")[1][:10]
