@@ -656,6 +656,7 @@ async def receive_barname(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return ConversationHandler.END
 
     context.user_data["barname"] = barname
+    context.user_data.pop("last_ack_message_id", None)
     # اگر این بارنامه قبلاً مدارکی داشته (رد شده یا حتی هنوز در انتظار بررسی)، آن‌ها حفظ و با مدارک جدید ادغام می‌شوند
     prev_docs = dict(existing.get("documents", {})) if existing_status in ("rejected", "pending") else {}
     context.user_data["session_documents"] = prev_docs
@@ -692,6 +693,16 @@ def upload_ack_inline_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+async def _strip_previous_ack_buttons(context, chat_id: int):
+    """دکمه‌های شیشه‌ای پیام «دریافت شد» قبلی را حذف می‌کند — فقط آخرین پیام باید دکمه داشته باشد"""
+    prev_msg_id = context.user_data.get("last_ack_message_id")
+    if prev_msg_id:
+        try:
+            await context.bot.edit_message_reply_markup(chat_id=chat_id, message_id=prev_msg_id, reply_markup=None)
+        except Exception:
+            pass  # پیام ممکن است قبلاً بدون دکمه شده باشد یا پاک شده باشد — مشکلی نیست
+
+
 async def receive_upload_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """دریافت هر عکس/فایل/متنی که راننده در حین ارسال مدارک بفرستد — بدون مرحله‌بندی و بدون دکمه شیشه‌ای.
     عکس/فایل به‌صورت یک مدرک شماره‌دار جدید ذخیره می‌شود؛ متن به‌عنوان شماره حساب/شبا در نظر گرفته می‌شود."""
@@ -707,6 +718,7 @@ async def receive_upload_item(update: Update, context: ContextTypes.DEFAULT_TYPE
     photo = update.message.photo[-1] if update.message.photo else None
     doc = update.message.document
     text = update.message.text
+    chat_id = update.effective_chat.id
 
     if photo or doc:
         context.user_data["doc_counter"] = context.user_data.get("doc_counter", 0) + 1
@@ -724,7 +736,8 @@ async def receive_upload_item(update: Update, context: ContextTypes.DEFAULT_TYPE
             "uploaded_at": now_str(),
         }
         count = sum(1 for k in session_docs if k.startswith("doc_"))
-        await update.message.reply_text(
+        await _strip_previous_ack_buttons(context, chat_id)
+        sent = await update.message.reply_text(
             f"📥 مدرک شماره {n} دریافت شد. (مجموع مدارک ارسالی: {count})\n\n"
             "⚠️ *هنوز چیزی برای شرکت ارسال نشده است.*\n"
             "اگر مدرک دیگری دارید همین الان بفرستید. وقتی همه‌ی مدارک کامل شد، حتماً "
@@ -732,6 +745,7 @@ async def receive_upload_item(update: Update, context: ContextTypes.DEFAULT_TYPE
             parse_mode="Markdown",
             reply_markup=upload_ack_inline_keyboard()
         )
+        context.user_data["last_ack_message_id"] = sent.message_id
     elif text and text.strip():
         session_docs["account"] = {
             "file_id": None,
@@ -740,7 +754,8 @@ async def receive_upload_item(update: Update, context: ContextTypes.DEFAULT_TYPE
             "label": "💳 شماره حساب/شبا اعلامی",
             "uploaded_at": now_str(),
         }
-        await update.message.reply_text(
+        await _strip_previous_ack_buttons(context, chat_id)
+        sent = await update.message.reply_text(
             f"📥 شماره حساب/شبا دریافت شد:\n`{text.strip()}`\n\n"
             "⚠️ *هنوز چیزی برای شرکت ارسال نشده است.*\n"
             "اگر مدرک دیگری دارید همین الان بفرستید. وقتی همه‌ی مدارک کامل شد، حتماً "
@@ -748,11 +763,12 @@ async def receive_upload_item(update: Update, context: ContextTypes.DEFAULT_TYPE
             parse_mode="Markdown",
             reply_markup=upload_ack_inline_keyboard()
         )
+        context.user_data["last_ack_message_id"] = sent.message_id
     else:
         await update.message.reply_text("⚠️ لطفاً فقط عکس، فایل یا شماره حساب/شبا ارسال کنید.")
         return WAIT_DOCS
 
-    _schedule_upload_reminder(context, update.effective_chat.id, barname)
+    _schedule_upload_reminder(context, chat_id, barname)
     return WAIT_DOCS
 
 
