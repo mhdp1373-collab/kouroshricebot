@@ -32,6 +32,7 @@ import hmac
 import base64
 import secrets
 import time
+import zipfile
 import asyncio
 import logging
 from types import SimpleNamespace
@@ -161,6 +162,8 @@ ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(","))) if os.getenv("
 STORAGE_CHANNEL_ID = os.getenv("STORAGE_CHANNEL_ID", "")
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@koroshrice")
 DB_FILE = _data_path("database.json")
+PRODUCT_TYPES_FILE = _data_path("product_types.json")
+DEFAULT_PRODUCT_TYPES = ["برنج ایرانی", "برنج خارجی", "شکر", "قند", "سایر"]
 
 # ─── تنظیمات داشبورد وب ادمین ───
 # DASHBOARD_TOKEN: دسترسی کامل (مشاهده + تایید/رد/کسری/بارگزاری/پیام)
@@ -214,6 +217,22 @@ def load_db() -> dict:
 def save_db(db: dict):
     with open(DB_FILE, "w", encoding="utf-8") as f:
         json.dump(db, f, ensure_ascii=False, indent=2)
+
+def load_product_types() -> list:
+    """لیست نوع محصولات قابل انتخاب برای بارنامه‌ها — ادمین می‌تواند از داشبورد ویرایشش کند"""
+    if os.path.exists(PRODUCT_TYPES_FILE):
+        try:
+            with open(PRODUCT_TYPES_FILE, "r", encoding="utf-8") as f:
+                types = json.load(f)
+                if isinstance(types, list) and types:
+                    return types
+        except Exception:
+            pass
+    return list(DEFAULT_PRODUCT_TYPES)
+
+def save_product_types(types: list):
+    with open(PRODUCT_TYPES_FILE, "w", encoding="utf-8") as f:
+        json.dump(types, f, ensure_ascii=False, indent=2)
 
 def get_barname_data(barname: str) -> dict:
     db = load_db()
@@ -349,7 +368,7 @@ def driver_reply_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton("🚀 بارگزاری مدارک"), KeyboardButton("📋 راهنما")],
-            [KeyboardButton("📦 وضعیت بارنامه"), KeyboardButton("❌ لغو عملیات")],
+            [KeyboardButton("📦 وضعیت بارنامه"), KeyboardButton("📞 ارتباط با ادمین")],
         ],
         resize_keyboard=True,
         input_field_placeholder="از منوی پایین انتخاب کنید..."
@@ -1971,6 +1990,15 @@ async def reply_keyboard_handler(update: Update, context: ContextTypes.DEFAULT_T
         )
         return ConversationHandler.END
 
+    elif text == "📞 ارتباط با ادمین":
+        admin_link = f"https://ble.ir/{ADMIN_USERNAME.lstrip('@')}"
+        await update.message.reply_text(
+            "📞 برای ارتباط مستقیم با ادمین، روی دکمه‌ی زیر بزنید 👇",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💬 گفتگو با ادمین", url=admin_link)]
+            ])
+        )
+
     # ─── دکمه‌های ادمین ───
     elif is_admin and text == "🔍 دریافت مستندات":
         context.user_data["admin_action"] = "get_docs"
@@ -2260,6 +2288,110 @@ async def api_set_product_type(barname: str, x_dashboard_token: str = Header(def
     return {"ok": True, "product_type": product_type}
 
 
+@dashboard_api.get("/api/product-types")
+async def api_list_product_types(token: str = Query(default="")):
+    """لیست نوع محصولات قابل انتخاب (برای پرکردن کشویی در داشبورد)"""
+    _check_dashboard_token(token)
+    return {"types": load_product_types()}
+
+
+@dashboard_api.post("/api/product-types")
+async def api_add_product_type(x_dashboard_token: str = Header(default=""), body: dict = Body(...)):
+    """افزودن یک نوع محصول جدید به لیست کشویی (فقط ادمین)"""
+    _require_admin_token(x_dashboard_token)
+    new_type = (body.get("type") or "").strip()
+    if not new_type:
+        raise HTTPException(status_code=400, detail="نام نوع محصول را وارد کنید.")
+    types = load_product_types()
+    if new_type in types:
+        raise HTTPException(status_code=409, detail="این نوع محصول قبلاً در لیست هست.")
+    types.append(new_type)
+    save_product_types(types)
+    return {"ok": True, "types": types}
+
+
+@dashboard_api.delete("/api/product-types/{type_name}")
+async def api_delete_product_type(type_name: str, x_dashboard_token: str = Header(default="")):
+    """حذف یک نوع محصول از لیست کشویی (فقط ادمین)"""
+    _require_admin_token(x_dashboard_token)
+    types = load_product_types()
+    if type_name not in types:
+        raise HTTPException(status_code=404, detail="این مورد در لیست پیدا نشد.")
+    types = [t for t in types if t != type_name]
+    if not types:
+        raise HTTPException(status_code=400, detail="لیست نوع محصولات نمی‌تواند کاملاً خالی بماند.")
+    save_product_types(types)
+    return {"ok": True, "types": types}
+
+
+def _media_type_and_ext(file_type: str):
+    if file_type == "photo":
+        return "image/jpeg", ".jpg"
+    if file_type == "pdf":
+        return "application/pdf", ".pdf"
+    return "application/octet-stream", ""
+
+
+@dashboard_api.get("/api/barnames/{barname}/zip")
+async def api_download_zip(barname: str, token: str = Query(default="")):
+    """دانلود همه‌ی مدارک راننده + پیوست‌های ادمین یک بارنامه، یک‌جا در یک فایل ZIP"""
+    _check_dashboard_token(token)
+    data = get_barname_data(barname)
+    docs = data.get("documents", {})
+    attachments = data.get("admin_attachments", [])
+    if not docs and not attachments:
+        raise HTTPException(status_code=404, detail="این بارنامه مدرکی برای دانلود ندارد.")
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for idx, (key, info) in enumerate(sorted(docs.items()), start=1):
+            label = doc_label(key, info)
+            safe_label = re.sub(r'[\\/*?:"<>|]', "-", label).strip() or key
+            ftype = info.get("file_type")
+            if ftype == "text":
+                content = f"{label}\n\n{info.get('text', '-')}".encode("utf-8")
+                zf.writestr(f"مدارک راننده/{idx:02d} - {safe_label}.txt", content)
+                continue
+            if not info.get("file_id") or not BOT_INSTANCE:
+                continue
+            try:
+                tg_file = await BOT_INSTANCE.get_file(info["file_id"])
+                file_bytes = bytes(await tg_file.download_as_bytearray())
+            except Exception as e:
+                logger.error(f"خطا در دریافت فایل برای ZIP ({key}): {e}")
+                continue
+            _, ext = _media_type_and_ext(ftype)
+            zf.writestr(f"مدارک راننده/{idx:02d} - {safe_label}{ext}", file_bytes)
+
+        for idx, att in enumerate(attachments, start=1):
+            cap = att.get("caption") or f"پیوست {idx}"
+            safe_cap = re.sub(r'[\\/*?:"<>|]', "-", cap).strip() or f"پیوست-{idx}"
+            ftype = att.get("file_type")
+            _, ext = _media_type_and_ext(ftype)
+            file_bytes = None
+            if att.get("source") == "dashboard":
+                file_path = os.path.join(DATA_DIR, "attachments", barname, att.get("filename", ""))
+                if os.path.isfile(file_path):
+                    with open(file_path, "rb") as f:
+                        file_bytes = f.read()
+            elif att.get("file_id") and BOT_INSTANCE:
+                try:
+                    tg_file = await BOT_INSTANCE.get_file(att["file_id"])
+                    file_bytes = bytes(await tg_file.download_as_bytearray())
+                except Exception as e:
+                    logger.error(f"خطا در دریافت پیوست برای ZIP: {e}")
+            if file_bytes:
+                zf.writestr(f"پیوست‌های ادمین/{idx:02d} - {safe_cap}{ext}", file_bytes)
+
+    zip_buf.seek(0)
+    filename = f"{barname}.zip"
+    return StreamingResponse(
+        zip_buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+
 @dashboard_api.get("/api/barnames/{barname}/log")
 async def api_get_barname_log(barname: str, x_dashboard_token: str = Header(default="")):
     """تاریخچه‌ی کامل تغییرات یک بارنامه (برای نمایش لاگ در داشبورد)"""
@@ -2389,6 +2521,8 @@ async def api_upload_attachment(
 async def api_approve(barname: str, x_dashboard_token: str = Header(default="")):
     _require_admin_token(x_dashboard_token)
     data = get_barname_data(barname)
+    if not (data.get("product_type") or "").strip():
+        raise HTTPException(status_code=400, detail="قبل از تایید، ابتدا نوع محصول را برای این بارنامه انتخاب کنید.")
     review = data.get("review", {})
     was_partial = review.get("status") == "partial"
     if review.get("status") not in ("pending", "partial"):
@@ -2445,6 +2579,8 @@ async def api_reject(barname: str, payload: dict = Body(...), x_dashboard_token:
         raise HTTPException(status_code=400, detail="علت عدم تایید الزامی است.")
 
     data = get_barname_data(barname)
+    if not (data.get("product_type") or "").strip():
+        raise HTTPException(status_code=400, detail="قبل از عدم تایید، ابتدا نوع محصول را برای این بارنامه انتخاب کنید.")
     review = data.get("review", {})
     if review.get("status") != "pending":
         raise HTTPException(status_code=400, detail="این بارنامه در وضعیت «در انتظار بررسی» نیست.")
@@ -2493,6 +2629,8 @@ async def api_partial(barname: str, payload: dict = Body(...), x_dashboard_token
         raise HTTPException(status_code=400, detail="مقدار کسری بار الزامی است.")
 
     data = get_barname_data(barname)
+    if not (data.get("product_type") or "").strip():
+        raise HTTPException(status_code=400, detail="قبل از ثبت کسری بار، ابتدا نوع محصول را برای این بارنامه انتخاب کنید.")
     review = data.get("review", {})
     if review.get("status") != "pending":
         raise HTTPException(status_code=400, detail="این بارنامه در وضعیت «در انتظار بررسی» نیست.")
@@ -2625,7 +2763,7 @@ async def run_app():
         ],
         states={
             WAIT_BARNAME: [
-                MessageHandler(filters.Regex("^(🚀 بارگزاری مدارک|📋 راهنما|📦 وضعیت بارنامه|❌ لغو عملیات|🔍 دریافت مستندات|📊 لیست بارنامه‌ها|📈 آمار کلی|🗑 حذف بارنامه|✅ بارنامه‌های تایید شده|🕐 نیازمند بررسی|🏠 منوی اصلی ادمین)$"), reply_keyboard_handler),
+                MessageHandler(filters.Regex("^(🚀 بارگزاری مدارک|📋 راهنما|📦 وضعیت بارنامه|❌ لغو عملیات|📞 ارتباط با ادمین|🔍 دریافت مستندات|📊 لیست بارنامه‌ها|📈 آمار کلی|🗑 حذف بارنامه|✅ بارنامه‌های تایید شده|🕐 نیازمند بررسی|🏠 منوی اصلی ادمین)$"), reply_keyboard_handler),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_barname),
                 CallbackQueryHandler(back_to_main, pattern="^back_to_main$"),
             ],
@@ -2677,7 +2815,7 @@ async def run_app():
     # افزودن عکس/فایل توسط ادمین به یک بارنامه (خارج از فلوی مکالمه‌ی راننده)
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, admin_attach_receive_file))
     # هندلر دکمه‌های منوی Reply (باید قبل از admin_text_handler باشه)
-    reply_kb_filter = filters.Regex("^(🚀 بارگزاری مدارک|📋 راهنما|📦 وضعیت بارنامه|❌ لغو عملیات|🔍 دریافت مستندات|📊 لیست بارنامه‌ها|📈 آمار کلی|🗑 حذف بارنامه|📎 افزودن عکس/فایل|✅ بارنامه‌های تایید شده|🕐 نیازمند بررسی|🏠 منوی اصلی ادمین)$")
+    reply_kb_filter = filters.Regex("^(🚀 بارگزاری مدارک|📋 راهنما|📦 وضعیت بارنامه|❌ لغو عملیات|📞 ارتباط با ادمین|🔍 دریافت مستندات|📊 لیست بارنامه‌ها|📈 آمار کلی|🗑 حذف بارنامه|📎 افزودن عکس/فایل|✅ بارنامه‌های تایید شده|🕐 نیازمند بررسی|🏠 منوی اصلی ادمین)$")
     app.add_handler(MessageHandler(reply_kb_filter, reply_keyboard_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler))
 
