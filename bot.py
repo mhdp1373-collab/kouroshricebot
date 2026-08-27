@@ -2289,9 +2289,9 @@ async def api_set_product_type(barname: str, x_dashboard_token: str = Header(def
 
 
 @dashboard_api.get("/api/product-types")
-async def api_list_product_types(token: str = Query(default="")):
+async def api_list_product_types(x_dashboard_token: str = Header(default="")):
     """لیست نوع محصولات قابل انتخاب (برای پرکردن کشویی در داشبورد)"""
-    _check_dashboard_token(token)
+    _check_dashboard_token(x_dashboard_token)
     return {"types": load_product_types()}
 
 
