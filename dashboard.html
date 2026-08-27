@@ -206,6 +206,17 @@
   </div>
 </div>
 
+<div class="overlay" id="viewerOverlay">
+  <div class="modal" style="max-width:900px; width:92%;">
+    <span class="close" onclick="closeViewer()">✕</span>
+    <h2 id="viewerTitle" style="margin-bottom:12px;"></h2>
+    <div id="viewerBody" style="background:var(--panel2); border-radius:8px; overflow:hidden;"></div>
+    <div style="margin-top:12px; text-align:left;">
+      <a id="viewerDownload" href="#" target="_blank" class="btn-ghost" style="display:inline-block; text-decoration:none; padding:8px 14px; border-radius:8px;">⬇️ دانلود فایل</a>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -557,23 +568,56 @@ function docCardHtml(barname, d) {
   }
   const url = `/api/barnames/${encodeURIComponent(barname)}/doc/${encodeURIComponent(d.key)}/file?token=${encodeURIComponent(TOKEN)}`;
   if (d.file_type === 'photo') {
-    return `<div class="doc-card"><img src="${url}" loading="lazy" onclick="window.open('${url}','_blank')"><div class="doc-label">${escapeHtml(d.label)}</div></div>`;
+    return `<div class="doc-card"><img src="${url}" loading="lazy" onclick="openViewer('${url}','photo','${escJs(d.label)}')"><div class="doc-label">${escapeHtml(d.label)}</div></div>`;
   }
-  const icon = d.file_type === 'pdf' ? '📕' : '📄';
-  const tag = d.file_type === 'pdf' ? 'مشاهده PDF' : 'مشاهده فایل';
-  return `<div class="doc-card"><a href="${url}" target="_blank" style="text-decoration:none; color:inherit;"><div class="doc-file">${icon}</div><div style="font-size:11px; color:var(--muted); text-align:center; padding-bottom:6px;">${tag}</div></a><div class="doc-label">${escapeHtml(d.label)}</div></div>`;
+  if (d.file_type === 'pdf') {
+    return `<div class="doc-card" onclick="openViewer('${url}','pdf','${escJs(d.label)}')" style="cursor:pointer;"><div class="doc-file">📕</div><div style="font-size:11px; color:var(--muted); text-align:center; padding-bottom:6px;">مشاهده PDF</div><div class="doc-label">${escapeHtml(d.label)}</div></div>`;
+  }
+  return `<div class="doc-card"><a href="${url}" target="_blank" style="text-decoration:none; color:inherit;"><div class="doc-file">📄</div><div style="font-size:11px; color:var(--muted); text-align:center; padding-bottom:6px;">مشاهده فایل</div></a><div class="doc-label">${escapeHtml(d.label)}</div></div>`;
 }
 
 function attachmentCardHtml(barname, a) {
   const url = `/api/barnames/${encodeURIComponent(barname)}/attachment/${encodeURIComponent(a.id)}/file?token=${encodeURIComponent(TOKEN)}`;
   const who = escapeHtml(a.uploaded_by || 'ادمین');
   const cap = a.caption ? `<br>${escapeHtml(a.caption)}` : '';
+  const label = a.caption || who;
   if (a.file_type === 'photo') {
-    return `<div class="doc-card"><img src="${url}" loading="lazy" onclick="window.open('${url}','_blank')"><div class="doc-label">📎 ${who}<br>${toJalaliDisplay(a.uploaded_at)}${cap}</div></div>`;
+    return `<div class="doc-card"><img src="${url}" loading="lazy" onclick="openViewer('${url}','photo','${escJs(label)}')"><div class="doc-label">📎 ${who}<br>${toJalaliDisplay(a.uploaded_at)}${cap}</div></div>`;
   }
-  const icon = a.file_type === 'pdf' ? '📕' : '📄';
-  const tag = a.file_type === 'pdf' ? 'مشاهده PDF' : 'مشاهده فایل';
-  return `<div class="doc-card"><a href="${url}" target="_blank" style="text-decoration:none; color:inherit;"><div class="doc-file">${icon}</div><div style="font-size:11px; color:var(--muted); text-align:center; padding-bottom:6px;">${tag}</div></a><div class="doc-label">📎 ${who}<br>${toJalaliDisplay(a.uploaded_at)}${cap}</div></div>`;
+  if (a.file_type === 'pdf') {
+    return `<div class="doc-card" onclick="openViewer('${url}','pdf','${escJs(label)}')" style="cursor:pointer;"><div class="doc-file">📕</div><div style="font-size:11px; color:var(--muted); text-align:center; padding-bottom:6px;">مشاهده PDF</div><div class="doc-label">📎 ${who}<br>${toJalaliDisplay(a.uploaded_at)}${cap}</div></div>`;
+  }
+  return `<div class="doc-card"><a href="${url}" target="_blank" style="text-decoration:none; color:inherit;"><div class="doc-file">📄</div><div style="font-size:11px; color:var(--muted); text-align:center; padding-bottom:6px;">مشاهده فایل</div></a><div class="doc-label">📎 ${who}<br>${toJalaliDisplay(a.uploaded_at)}${cap}</div></div>`;
+}
+
+function escJs(s) {
+  return String(s == null ? '' : s)
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function openViewer(url, type, label) {
+  const body = document.getElementById('viewerBody');
+  document.getElementById('viewerTitle').textContent = label || '';
+  if (type === 'photo') {
+    body.innerHTML = `<img src="${url}" style="max-width:100%; max-height:80vh; display:block; margin:0 auto;">`;
+  } else if (type === 'pdf') {
+    body.innerHTML = `<iframe src="${url}" style="width:100%; height:80vh; border:none; background:#fff;"></iframe>`;
+  } else {
+    body.innerHTML = '';
+    window.open(url, '_blank');
+    return;
+  }
+  document.getElementById('viewerDownload').href = url;
+  document.getElementById('viewerOverlay').classList.add('open');
+}
+
+function closeViewer() {
+  document.getElementById('viewerOverlay').classList.remove('open');
+  document.getElementById('viewerBody').innerHTML = '';
 }
 
 function logItemHtml(item) {
