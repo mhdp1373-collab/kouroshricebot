@@ -55,6 +55,11 @@
   table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: var(--radius); overflow: hidden; }
   th, td { padding: 12px 14px; text-align: right; border-bottom: 1px solid var(--border); font-size: 13px; }
   th { color: var(--muted); font-weight: 600; background: var(--panel2); }
+  tr.filter-row th { padding: 6px 10px; background: var(--panel); }
+  .col-filter {
+    width: 100%; box-sizing: border-box; padding: 6px 8px; font-size: 12px;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--panel2); color: var(--text);
+  }
   tr.row { cursor: pointer; }
   tr.row:hover { background: var(--panel2); }
   .badge { padding: 3px 10px; border-radius: 999px; font-size: 12px; white-space: nowrap; }
@@ -134,6 +139,7 @@
   <header>
     <h1>📦 داشبورد بارنامه‌ها <span id="roleBadge" class="badge badge-none" style="margin-right:8px; font-size:11px; vertical-align:middle;"></span></h1>
     <div style="display:flex; gap:8px;">
+      <button class="btn-ghost" id="settingsBtn" onclick="openSettings()" style="display:none;">⚙️ تنظیمات</button>
       <button class="btn-ghost" onclick="exportExcel()">📥 خروجی اکسل</button>
       <button class="btn-ghost" onclick="logout()">خروج</button>
     </div>
@@ -146,6 +152,7 @@
     <div class="toolbar">
       <input type="text" id="searchInput" placeholder="جستجوی شماره بارنامه..." oninput="debouncedLoad()">
       <button class="btn-ghost" onclick="loadList()">🔄 بروزرسانی</button>
+      <button class="btn-ghost" onclick="clearColumnFilters()">✖️ پاک کردن فیلترها</button>
     </div>
 
     <div class="tabs" id="tabsRow" style="margin-bottom:16px;"></div>
@@ -155,6 +162,21 @@
         <thead>
           <tr>
             <th>وضعیت</th><th>شماره بارنامه</th><th>راننده</th><th>نوع محصول</th><th>یادداشت کسری</th><th>مستندات</th><th>تاریخ ثبت</th><th>اولین واکنش ادمین</th><th>آخرین واکنش ادمین</th>
+          </tr>
+          <tr class="filter-row">
+            <th></th>
+            <th><input type="text" class="col-filter" data-col="barname" placeholder="فیلتر..." oninput="debouncedApplyFilters()"></th>
+            <th><input type="text" class="col-filter" data-col="driver_name" placeholder="فیلتر..." oninput="debouncedApplyFilters()"></th>
+            <th><select class="col-filter" data-col="product_type" onchange="applyFilters()"><option value="">همه</option></select></th>
+            <th><select class="col-filter" data-col="has_deduction" onchange="applyFilters()">
+                  <option value="">همه</option>
+                  <option value="yes">دارای کسری</option>
+                  <option value="no">بدون کسری</option>
+                </select></th>
+            <th></th>
+            <th><input type="text" class="col-filter" data-col="created_at" placeholder="فیلتر..." oninput="debouncedApplyFilters()"></th>
+            <th><input type="text" class="col-filter" data-col="first_admin_response_at" placeholder="فیلتر..." oninput="debouncedApplyFilters()"></th>
+            <th><input type="text" class="col-filter" data-col="last_admin_response_at" placeholder="فیلتر..." oninput="debouncedApplyFilters()"></th>
           </tr>
         </thead>
         <tbody id="listBody"></tbody>
@@ -171,6 +193,19 @@
   </div>
 </div>
 
+<div class="overlay" id="settingsOverlay">
+  <div class="modal" style="max-width:420px;">
+    <span class="close" onclick="closeSettings()">✕</span>
+    <h2>⚙️ تنظیمات — نوع محصولات</h2>
+    <p class="info-line">این‌ها گزینه‌های کشویی «نوع محصول» هستند که موقع تایید هر بارنامه انتخاب می‌شود.</p>
+    <div id="productTypesList" style="margin:14px 0;"></div>
+    <div style="display:flex; gap:8px; margin-top:10px;">
+      <input type="text" id="newProductTypeInput" placeholder="نوع محصول جدید..." style="flex:1;">
+      <button class="btn-primary" onclick="addProductType()">افزودن</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -179,6 +214,9 @@ let ROLE = '';
 let currentStatus = 'all';
 let currentBarname = null;
 let debounceTimer = null;
+let filterDebounceTimer = null;
+let ALL_ROWS = [];
+let PRODUCT_TYPES = [];
 
 const STATUS_LABELS = {
   all: 'همه', pending: '🕐 در انتظار', approved: '✅ تایید شده',
@@ -205,7 +243,12 @@ function showConnErr(msg) {
 
 function debouncedLoad() {
   clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(loadList, 350);
+  debounceTimer = setTimeout(applyFilters, 350);
+}
+
+function debouncedApplyFilters() {
+  clearTimeout(filterDebounceTimer);
+  filterDebounceTimer = setTimeout(applyFilters, 300);
 }
 
 async function apiFetch(path, opts) {
@@ -249,6 +292,74 @@ function exportExcel() {
   window.open(`/api/export/xlsx?token=${encodeURIComponent(TOKEN)}`, '_blank');
 }
 
+function downloadZip(barname) {
+  window.open(`/api/barnames/${encodeURIComponent(barname)}/zip?token=${encodeURIComponent(TOKEN)}`, '_blank');
+}
+
+// ── نوع محصولات (کشویی + پنل تنظیمات) ──
+async function loadProductTypesIntoFilter() {
+  try {
+    const res = await apiFetch('/api/product-types');
+    PRODUCT_TYPES = res.types || [];
+  } catch (e) { PRODUCT_TYPES = []; }
+
+  const filterSelect = document.querySelector('.col-filter[data-col="product_type"]');
+  if (filterSelect) {
+    const current = filterSelect.value;
+    filterSelect.innerHTML = '<option value="">همه</option>' +
+      PRODUCT_TYPES.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
+    filterSelect.value = current;
+  }
+}
+
+function openSettings() {
+  document.getElementById('settingsOverlay').classList.add('open');
+  renderProductTypesSettings();
+}
+
+function closeSettings() {
+  document.getElementById('settingsOverlay').classList.remove('open');
+}
+
+function renderProductTypesSettings() {
+  const wrap = document.getElementById('productTypesList');
+  if (!PRODUCT_TYPES.length) {
+    wrap.innerHTML = '<p class="info-line">هیچ نوع محصولی ثبت نشده.</p>';
+    return;
+  }
+  wrap.innerHTML = PRODUCT_TYPES.map(t => `
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 10px; background:var(--panel2); border-radius:8px; margin-bottom:6px;">
+      <span>${escapeHtml(t)}</span>
+      <button class="btn-red" style="padding:4px 10px; font-size:12px;" onclick="deleteProductType('${escapeHtml(t).replace(/'/g, "\\'")}')">حذف</button>
+    </div>
+  `).join('');
+}
+
+async function addProductType() {
+  const input = document.getElementById('newProductTypeInput');
+  const val = input.value.trim();
+  if (!val) { toast('نام نوع محصول را بنویسید', false); return; }
+  try {
+    const res = await apiFetch('/api/product-types', { method: 'POST', body: JSON.stringify({ type: val }) });
+    PRODUCT_TYPES = res.types || PRODUCT_TYPES;
+    input.value = '';
+    renderProductTypesSettings();
+    await loadProductTypesIntoFilter();
+    toast('اضافه شد', true);
+  } catch (e) { toast(e.message, false); }
+}
+
+async function deleteProductType(name) {
+  if (!confirm(`«${name}» از لیست نوع محصولات حذف شود؟`)) return;
+  try {
+    const res = await apiFetch(`/api/product-types/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    PRODUCT_TYPES = res.types || PRODUCT_TYPES;
+    renderProductTypesSettings();
+    await loadProductTypesIntoFilter();
+    toast('حذف شد', true);
+  } catch (e) { toast(e.message, false); }
+}
+
 async function checkAndEnter() {
   try {
     const who = await apiFetch('/api/whoami');
@@ -257,9 +368,11 @@ async function checkAndEnter() {
     if (ROLE === 'admin') {
       badge.textContent = '👑 دسترسی کامل';
       badge.className = 'badge badge-approved';
+      document.getElementById('settingsBtn').style.display = 'inline-block';
     } else {
       badge.textContent = '👁️ فقط مشاهده';
       badge.className = 'badge badge-pending';
+      document.getElementById('settingsBtn').style.display = 'none';
     }
     document.getElementById('loginBox').style.display = 'none';
     document.getElementById('app').style.display = 'block';
@@ -277,46 +390,71 @@ function renderTabs() {
     const el = document.createElement('div');
     el.className = 'tab' + (key === currentStatus ? ' active' : '');
     el.textContent = STATUS_LABELS[key];
-    el.onclick = () => { currentStatus = key; renderTabs(); loadList(); };
+    el.onclick = () => { currentStatus = key; renderTabs(); applyFilters(); };
     wrap.appendChild(el);
   });
 }
 
 async function loadList() {
-  const search = document.getElementById('searchInput').value.trim();
-  const params = new URLSearchParams({ status: currentStatus, search });
   try {
-    const rows = await apiFetch('/api/barnames?' + params.toString());
+    ALL_ROWS = await apiFetch('/api/barnames?status=all&search=');
     showConnErr(null);
-    renderStats();
-    renderList(rows);
+    await loadProductTypesIntoFilter();
+    applyFilters();
   } catch (e) {
     showConnErr(e.message);
+    ALL_ROWS = [];
     renderList([]);
   }
 }
 
-async function renderStats() {
-  try {
-    const rows = await apiFetch('/api/barnames?status=all');
-    const counts = { pending: 0, approved: 0, rejected: 0, partial: 0, none: 0 };
-    rows.forEach(r => { counts[r.status] = (counts[r.status] || 0) + 1; });
-    const wrap = document.getElementById('statsRow');
-    wrap.innerHTML = '';
-    const items = [
-      ['کل بارنامه‌ها', rows.length],
-      ['در انتظار بررسی', counts.pending],
-      ['تایید شده', counts.approved],
-      ['رد شده', counts.rejected],
-      ['کسری بار', counts.partial],
-    ];
-    items.forEach(([label, num]) => {
-      const card = document.createElement('div');
-      card.className = 'stat-card';
-      card.innerHTML = `<div class="num">${num}</div><div class="label">${label}</div>`;
-      wrap.appendChild(card);
-    });
-  } catch (e) { /* خطا همان بالا توسط loadList نشان داده می‌شود */ }
+function clearColumnFilters() {
+  document.querySelectorAll('.col-filter').forEach(el => { el.value = ''; });
+  document.getElementById('searchInput').value = '';
+  applyFilters();
+}
+
+function applyFilters() {
+  const search = document.getElementById('searchInput').value.trim();
+  const colFilters = {};
+  document.querySelectorAll('.col-filter').forEach(el => {
+    colFilters[el.dataset.col] = el.value.trim();
+  });
+
+  let rows = ALL_ROWS.filter(r => currentStatus === 'all' || r.status === currentStatus);
+
+  if (search) rows = rows.filter(r => (r.barname || '').includes(search));
+  if (colFilters.barname) rows = rows.filter(r => (r.barname || '').includes(colFilters.barname));
+  if (colFilters.driver_name) rows = rows.filter(r => (r.driver_name || '').includes(colFilters.driver_name));
+  if (colFilters.product_type) rows = rows.filter(r => (r.product_type || '') === colFilters.product_type);
+  if (colFilters.has_deduction === 'yes') rows = rows.filter(r => !!r.deduction_note);
+  if (colFilters.has_deduction === 'no') rows = rows.filter(r => !r.deduction_note);
+  if (colFilters.created_at) rows = rows.filter(r => toJalaliDisplayPlain(r.created_at).includes(colFilters.created_at));
+  if (colFilters.first_admin_response_at) rows = rows.filter(r => toJalaliDisplayPlain(r.first_admin_response_at).includes(colFilters.first_admin_response_at));
+  if (colFilters.last_admin_response_at) rows = rows.filter(r => toJalaliDisplayPlain(r.last_admin_response_at).includes(colFilters.last_admin_response_at));
+
+  renderStats(rows);
+  renderList(rows);
+}
+
+function renderStats(rows) {
+  const counts = { pending: 0, approved: 0, rejected: 0, partial: 0, none: 0 };
+  rows.forEach(r => { counts[r.status] = (counts[r.status] || 0) + 1; });
+  const wrap = document.getElementById('statsRow');
+  wrap.innerHTML = '';
+  const items = [
+    ['کل بارنامه‌ها', rows.length],
+    ['در انتظار بررسی', counts.pending],
+    ['تایید شده', counts.approved],
+    ['رد شده', counts.rejected],
+    ['کسری بار', counts.partial],
+  ];
+  items.forEach(([label, num]) => {
+    const card = document.createElement('div');
+    card.className = 'stat-card';
+    card.innerHTML = `<div class="num">${num}</div><div class="label">${label}</div>`;
+    wrap.appendChild(card);
+  });
 }
 
 function renderList(rows) {
@@ -402,6 +540,17 @@ function toJalaliDisplay(dateStr) {
   return escapeHtml(out);
 }
 
+function toJalaliDisplayPlain(dateStr) {
+  if (!dateStr || dateStr === '-') return '';
+  const m = String(dateStr).match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?/);
+  if (!m) return String(dateStr);
+  const [, gy, gm, gd, hh, mi] = m;
+  const [jy, jm, jd] = gregorianToJalali(+gy, +gm, +gd);
+  let out = `${jy}/${String(jm).padStart(2, '0')}/${String(jd).padStart(2, '0')}`;
+  if (hh !== undefined) out += ` ${hh}:${mi}`;
+  return out;
+}
+
 function docCardHtml(barname, d) {
   if (d.file_type === 'text') {
     return `<div class="doc-card"><div class="doc-text">${escapeHtml(d.text || '-')}</div><div class="doc-label">${escapeHtml(d.label)}</div></div>`;
@@ -439,27 +588,34 @@ function renderDetail(data) {
   const review = data.review || {};
   const status = review.status || 'none';
   const isAdmin = ROLE === 'admin';
+  const hasProductType = !!(data.product_type && data.product_type.trim());
 
   const docsHtml = (data.documents || []).map(d => docCardHtml(data.barname, d)).join('');
   const attachmentsHtml = (data.admin_attachments || []).map(a => attachmentCardHtml(data.barname, a)).join('');
 
   let actionsHtml = '';
   if (status === 'pending') {
-    actionsHtml = isAdmin ? `
-      <div class="action-row">
-        <button class="btn-green" onclick="doApprove()">✅ تایید</button>
-        <button class="btn-red" onclick="toggleForm('rejectForm')">❌ عدم تایید</button>
-        <button class="btn-orange" onclick="toggleForm('partialForm')">⚠️ تایید با کسری بار</button>
-      </div>
-      <div class="subform" id="rejectForm">
-        <textarea id="rejectReason" placeholder="علت عدم تایید را بنویسید..."></textarea>
-        <button class="btn-red" onclick="doReject()">ارسال عدم تایید</button>
-      </div>
-      <div class="subform" id="partialForm">
-        <textarea id="partialNote" placeholder="مقدار کسری بار را بنویسید (مثلاً: ۲ تن)..."></textarea>
-        <button class="btn-orange" onclick="doPartial()">ارسال تایید با کسری بار</button>
-      </div>
-    ` : `<p class="info-line">🕐 این بارنامه در انتظار بررسی ادمین است. (شما فقط دسترسی مشاهده دارید)</p>`;
+    if (!isAdmin) {
+      actionsHtml = `<p class="info-line">🕐 این بارنامه در انتظار بررسی ادمین است. (شما فقط دسترسی مشاهده دارید)</p>`;
+    } else if (!hasProductType) {
+      actionsHtml = `<p class="info-line" style="color:var(--red);">⚠️ برای تایید/عدم‌تایید/کسری بار، ابتدا باید «نوع محصول» را از بالا انتخاب کنید.</p>`;
+    } else {
+      actionsHtml = `
+        <div class="action-row">
+          <button class="btn-green" onclick="doApprove()">✅ تایید</button>
+          <button class="btn-red" onclick="toggleForm('rejectForm')">❌ عدم تایید</button>
+          <button class="btn-orange" onclick="toggleForm('partialForm')">⚠️ تایید با کسری بار</button>
+        </div>
+        <div class="subform" id="rejectForm">
+          <textarea id="rejectReason" placeholder="علت عدم تایید را بنویسید..."></textarea>
+          <button class="btn-red" onclick="doReject()">ارسال عدم تایید</button>
+        </div>
+        <div class="subform" id="partialForm">
+          <textarea id="partialNote" placeholder="مقدار کسری بار را بنویسید (مثلاً: ۲ تن)..."></textarea>
+          <button class="btn-orange" onclick="doPartial()">ارسال تایید با کسری بار</button>
+        </div>
+      `;
+    }
   } else if (status === 'partial') {
     const dr = review.driver_response;
     let driverNote = '🕐 راننده هنوز به کسری بار پاسخ نداده است.';
@@ -468,12 +624,14 @@ function renderDetail(data) {
     actionsHtml = `
       <p class="info-line"><b>مقدار کسری اعلام‌شده:</b> ${escapeHtml(review.deduction_note || '-')}</p>
       <p class="info-line">${driverNote}</p>
-      ${isAdmin ? `
-      <div class="action-row">
-        <button class="btn-green" onclick="doApprove()">✅ تایید نهایی بارنامه</button>
-      </div>
-      <p class="info-line" style="color:var(--muted); font-size:12px;">تا زدن این دکمه، بارنامه «تایید شده» محسوب نمی‌شود و مبلغی واریز نخواهد شد.</p>
-      ` : `<p class="info-line">👁️ فقط دسترسی مشاهده دارید — تایید نهایی فقط با ادمین است.</p>`}
+      ${!isAdmin ? `<p class="info-line">👁️ فقط دسترسی مشاهده دارید — تایید نهایی فقط با ادمین است.</p>`
+        : !hasProductType ? `<p class="info-line" style="color:var(--red);">⚠️ برای تایید نهایی، ابتدا باید «نوع محصول» را از بالا انتخاب کنید.</p>`
+        : `
+        <div class="action-row">
+          <button class="btn-green" onclick="doApprove()">✅ تایید نهایی بارنامه</button>
+        </div>
+        <p class="info-line" style="color:var(--muted); font-size:12px;">تا زدن این دکمه، بارنامه «تایید شده» محسوب نمی‌شود و مبلغی واریز نخواهد شد.</p>
+      `}
     `;
   } else {
     actionsHtml = `<p class="info-line">این بارنامه قبلاً بررسی شده و دیگر قابل تغییر از این بخش نیست.</p>`;
@@ -486,11 +644,14 @@ function renderDetail(data) {
     ? `<div class="timeline">${logItems.map(logItemHtml).join('')}</div>`
     : `<p class="no-log">هنوز رویدادی برای این بارنامه ثبت نشده.</p>`;
 
+  const productTypeOptions = ['<option value="">— انتخاب کنید —</option>']
+    .concat(PRODUCT_TYPES.map(t => `<option value="${escapeHtml(t)}" ${data.product_type === t ? 'selected' : ''}>${escapeHtml(t)}</option>`))
+    .join('');
+
   const productTypeHtml = isAdmin ? `
     <div class="msgbox" style="border-top:none; padding-top:0; margin-top:12px;">
-      <div class="info-line" style="margin-bottom:6px;">🌾 نوع محصول</div>
-      <input type="text" id="productTypeInput" placeholder="مثلاً: برنج ایرانی، برنج خارجی، شکر، آرد و ..." value="${escapeHtml(data.product_type || '')}" style="width:100%; margin-bottom:8px;">
-      <button class="btn-primary" onclick="saveProductType()">ذخیره نوع محصول</button>
+      <div class="info-line" style="margin-bottom:6px;">🌾 نوع محصول ${!hasProductType ? '<span style="color:var(--red);">(الزامی برای واکنش)</span>' : ''}</div>
+      <select id="productTypeInput" style="width:100%; margin-bottom:8px;" onchange="saveProductType()">${productTypeOptions}</select>
     </div>
   ` : `<div class="info-line" style="margin-top:12px;">🌾 نوع محصول: <b>${escapeHtml(data.product_type || '-')}</b></div>`;
 
@@ -511,6 +672,8 @@ function renderDetail(data) {
     </div>
   ` : '';
 
+  const hasAnyFile = (data.documents || []).length > 0 || (data.admin_attachments || []).length > 0;
+
   document.getElementById('detailContent').innerHTML = `
     <h2>📦 بارنامه ${escapeHtml(data.barname)} <span class="badge ${BADGE_CLASS[status] || 'badge-none'}">${escapeHtml(data.status_label)}</span></h2>
     <div class="info-line">👤 راننده: <b>${escapeHtml(data.driver_name || '-')}</b> (آیدی: ${escapeHtml(data.driver_id || '-')})</div>
@@ -519,6 +682,8 @@ function renderDetail(data) {
     ${data.first_admin_response_at ? `<div class="info-line">🕐 اولین واکنش ادمین: ${toJalaliDisplay(data.first_admin_response_at)}</div>` : ''}
     ${data.last_admin_response_at ? `<div class="info-line">🕐 آخرین واکنش ادمین: ${toJalaliDisplay(data.last_admin_response_at)}</div>` : ''}
     ${productTypeHtml}
+    <div class="section-title">📄 مدارک</div>
+    ${hasAnyFile ? `<button class="btn-ghost" onclick="downloadZip('${data.barname}')" style="margin-bottom:10px;">📦 دانلود همه (ZIP)</button>` : ''}
     <div class="doc-grid">${docsHtml || '<p class="info-line">مستندی یافت نشد</p>'}</div>
     ${actionsHtml}
     <div class="section-title">📎 عکس/فایل‌های افزوده‌شده توسط ادمین</div>
@@ -542,6 +707,7 @@ async function saveProductType() {
       method: 'POST', body: JSON.stringify({ type: val })
     });
     toast('نوع محصول ذخیره شد', true);
+    await openDetail(currentBarname);
     loadList();
   } catch (e) { toast(e.message, false); }
 }
